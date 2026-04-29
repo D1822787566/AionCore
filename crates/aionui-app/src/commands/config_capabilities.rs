@@ -92,12 +92,12 @@ pub(crate) fn data() -> Value {
             domain("mcp", &[
                 no_input_redacted(&["mcp", "servers", "list"], "List MCP servers.", false, &["transport.headers", "transport.env"]),
                 stdin_redacted(&["mcp", "servers", "get"], "Read one MCP server.", &["server_id"], &[], false, false, &["transport.headers", "transport.env"]),
-                stdin_redacted(&["mcp", "servers", "create"], "Create an MCP server.", &["name", "transport"], &[], true, false, &["transport.headers", "transport.env"]),
+                mcp_create(),
                 stdin_redacted(&["mcp", "servers", "update"], "Update an MCP server.", &["server_id", "transport"], &[], true, false, &["transport.headers", "transport.env"]),
                 stdin_redacted(&["mcp", "servers", "delete"], "Delete an MCP server.", &["server_id"], &[], true, true, &["transport.headers", "transport.env"]),
                 stdin_redacted(&["mcp", "servers", "toggle"], "Toggle an MCP server.", &["server_id"], &[], true, false, &["transport.headers", "transport.env"]),
-                stdin_redacted(&["mcp", "servers", "import"], "Import MCP servers.", &["servers"], &[], true, false, &["transport.headers", "transport.env"]),
-                stdin_redacted(&["mcp", "test-connection"], "Test an MCP server configuration.", &["name", "transport"], &[], false, false, &["transport.headers", "transport.env"]),
+                mcp_import(),
+                mcp_test_connection(),
                 no_input_redacted(&["mcp", "agent-configs"], "List agent MCP config state.", false, &["transport.headers", "transport.env"]),
                 stdin_redacted(&["mcp", "oauth", "check-status"], "Check MCP OAuth status.", &["server_url"], &[], false, false, &[]),
                 stdin_redacted(&["mcp", "oauth", "login"], "Start MCP OAuth login.", &["server_url"], &[], true, false, &[]),
@@ -146,6 +146,138 @@ pub(crate) fn data() -> Value {
             ]),
         ]
     })
+}
+
+fn mcp_transport_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["type", "command"],
+                "properties": {
+                    "type": { "const": "stdio" },
+                    "command": { "type": "string", "minLength": 1 },
+                    "args": { "type": "array", "items": { "type": "string" } },
+                    "env": { "type": "object", "additionalProperties": { "type": "string" } }
+                }
+            },
+            {
+                "type": "object",
+                "required": ["type", "url"],
+                "properties": {
+                    "type": {
+                        "enum": ["http", "sse", "remote", "streamable_http", "streamable-http"],
+                        "description": "remote and streamable-http aliases are normalized to http"
+                    },
+                    "url": { "type": "string", "minLength": 1 },
+                    "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+                }
+            }
+        ]
+    })
+}
+
+fn with_stdin_contract(mut descriptor: Value, schema: Value, examples: Value) -> Value {
+    if let Some(object) = descriptor.as_object_mut() {
+        object.insert("stdin_json_schema".into(), schema);
+        object.insert("examples".into(), examples);
+    }
+    descriptor
+}
+
+fn mcp_create() -> Value {
+    with_stdin_contract(
+        stdin_redacted(
+            &["mcp", "servers", "create"],
+            "Create a disabled MCP server. Use import to preserve enabled state.",
+            &["name", "transport"],
+            &[],
+            true,
+            false,
+            &["transport.headers", "transport.env"],
+        ),
+        json!({
+            "type": "object",
+            "required": ["name", "transport"],
+            "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "description": { "type": "string" },
+                "transport": mcp_transport_schema()
+            }
+        }),
+        json!([{
+            "name": "vision",
+            "transport": { "type": "http", "url": "http://localhost:8102/mcp" }
+        }]),
+    )
+}
+
+fn mcp_import() -> Value {
+    with_stdin_contract(
+        stdin_redacted(
+            &["mcp", "servers", "import"],
+            "Import MCP servers. Accepts canonical servers arrays and common mcp/mcpServers maps; unsupported timeout fields are ignored with a warning.",
+            &["servers", "mcp", "mcpServers"],
+            &[],
+            true,
+            false,
+            &["transport.headers", "transport.env"],
+        ),
+        json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["servers"],
+                    "properties": { "servers": { "type": "array" } }
+                },
+                {
+                    "type": "object",
+                    "required": ["mcp"],
+                    "properties": { "mcp": { "type": "object" } }
+                },
+                {
+                    "type": "object",
+                    "required": ["mcpServers"],
+                    "properties": { "mcpServers": { "type": "object" } }
+                }
+            ]
+        }),
+        json!([{
+            "mcp": {
+                "vision": {
+                    "type": "remote",
+                    "url": "http://localhost:8102/mcp",
+                    "enabled": true
+                }
+            }
+        }]),
+    )
+}
+
+fn mcp_test_connection() -> Value {
+    with_stdin_contract(
+        stdin_redacted(
+            &["mcp", "test-connection"],
+            "Test an MCP server configuration.",
+            &["name", "transport"],
+            &[],
+            false,
+            false,
+            &["transport.headers", "transport.env"],
+        ),
+        json!({
+            "type": "object",
+            "required": ["name", "transport"],
+            "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "transport": mcp_transport_schema()
+            }
+        }),
+        json!([{
+            "name": "vision",
+            "transport": { "type": "http", "url": "http://localhost:8102/mcp" }
+        }]),
+    )
 }
 
 fn domain(name: &str, commands: &[Value]) -> Value {
@@ -252,4 +384,32 @@ fn command(spec: CommandDescriptor<'_>) -> Value {
         "requires_context": requires_context,
         "redacted_fields": spec.redacted_fields,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_by_path(path: &[&str]) -> Value {
+        data()["domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|domain| domain["commands"].as_array().unwrap())
+            .find(|command| command["path"] == json!(path))
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn mcp_commands_publish_transport_schema_and_examples() {
+        let create = command_by_path(&["mcp", "servers", "create"]);
+        let import = command_by_path(&["mcp", "servers", "import"]);
+        let test = command_by_path(&["mcp", "test-connection"]);
+
+        assert_eq!(create["stdin_json_schema"]["required"], json!(["name", "transport"]));
+        assert_eq!(create["examples"][0]["transport"]["type"], "http");
+        assert_eq!(import["examples"][0]["mcp"]["vision"]["type"], "remote");
+        assert!(test.get("stdin_json_schema").is_some());
+    }
 }

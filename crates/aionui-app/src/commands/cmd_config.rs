@@ -476,17 +476,7 @@ async fn run_mcp(client: &reqwest::Client, args: ConfigMcpArgs) -> Result<(), Co
                 )
                 .await
             }
-            ConfigMcpServersCommand::Import => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config mcp servers import",
-                    Method::POST,
-                    "/api/mcp/servers/import",
-                    "/api/mcp/servers",
-                    true,
-                )
-                .await
-            }
+            ConfigMcpServersCommand::Import => run_mcp_server_import(client).await,
         },
         ConfigMcpCommand::TestConnection => {
             run_payload_request(
@@ -553,6 +543,172 @@ async fn run_mcp(client: &reqwest::Client, args: ConfigMcpArgs) -> Result<(), Co
             }
         },
     }
+}
+
+async fn run_mcp_server_import(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config mcp servers import";
+    let env = ConfigEnv::from_env(command)?;
+    let payload = read_stdin_payload(command)?;
+    let (mut payload, warnings) = normalize_mcp_import_payload(payload, command)?;
+    let mut selectors = SelectorMeta::default();
+    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
+    let before = request_json(client, &env, Method::GET, "/api/mcp/servers", None, command).await?;
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        "/api/mcp/servers/import",
+        Some(payload),
+        command,
+    )
+    .await?;
+    let after = request_json(client, &env, Method::GET, "/api/mcp/servers", None, command).await?;
+    let mut extra = selectors.into_map();
+    if !warnings.is_empty() {
+        extra.insert("warnings".into(), json!(warnings));
+    }
+    print_config_output(data, readback_meta(extra, before, after), command, true)
+}
+
+fn normalize_mcp_import_payload(payload: Value, command: &str) -> Result<(Value, Vec<String>), ConfigError> {
+    let mut warnings = Vec::new();
+    let raw_servers = match payload {
+        Value::Object(mut object) => {
+            if let Some(servers) = object.remove("servers") {
+                servers
+            } else if let Some(servers) = object.remove("mcpServers").or_else(|| object.remove("mcp")) {
+                let map = servers
+                    .as_object()
+                    .ok_or_else(|| mcp_payload_error(command, "mcp", "must be an object"))?;
+                Value::Array(
+                    map.iter()
+                        .map(|(name, config)| external_mcp_server(name, config.clone(), command, &mut warnings))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            } else {
+                return Err(mcp_payload_error(
+                    command,
+                    "stdin",
+                    "expected one of: servers, mcpServers, mcp",
+                ));
+            }
+        }
+        Value::Array(servers) => Value::Array(servers),
+        _ => return Err(mcp_payload_error(command, "stdin", "must be an object or array")),
+    };
+
+    let servers = raw_servers
+        .as_array()
+        .ok_or_else(|| mcp_payload_error(command, "servers", "must be an array"))?;
+    let normalized = servers
+        .iter()
+        .enumerate()
+        .map(|(index, server)| {
+            let name = server
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| mcp_payload_error(command, &format!("servers[{index}].name"), "is required"))?;
+            external_mcp_server(name, server.clone(), command, &mut warnings)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if normalized.is_empty() {
+        return Err(mcp_payload_error(
+            command,
+            "servers",
+            "must contain at least one server",
+        ));
+    }
+    Ok((json!({ "servers": normalized }), warnings))
+}
+
+fn external_mcp_server(
+    name: &str,
+    config: Value,
+    command: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Value, ConfigError> {
+    let config = config
+        .as_object()
+        .ok_or_else(|| mcp_payload_error(command, &format!("{name}.config"), "must be an object"))?;
+    let transport_source = config.get("transport").and_then(Value::as_object).unwrap_or(config);
+    let raw_type = config
+        .get("type")
+        .or_else(|| config.get("transport").filter(|value| value.is_string()))
+        .or_else(|| transport_source.get("type"))
+        .and_then(Value::as_str);
+    let has_command = transport_source.get("command").is_some();
+    let has_url = transport_source.get("url").or_else(|| config.get("url")).is_some();
+    let transport_type = match raw_type {
+        Some("remote" | "streamable_http" | "streamable-http") => "http",
+        Some("stdio") => "stdio",
+        Some("sse") => "sse",
+        Some("http") => "http",
+        Some(_) => {
+            return Err(mcp_payload_error(
+                command,
+                &format!("{name}.transport.type"),
+                "must be one of stdio, sse, http, remote, streamable_http, streamable-http",
+            ));
+        }
+        None if has_command && !has_url => "stdio",
+        None if has_url && !has_command => "http",
+        None => {
+            return Err(mcp_payload_error(
+                command,
+                &format!("{name}.transport"),
+                "must contain either command or url",
+            ));
+        }
+    };
+
+    if transport_source.contains_key("timeout") || config.contains_key("timeout") {
+        warnings.push(format!("{name}.transport.timeout is unsupported and was ignored"));
+    }
+
+    let transport = if transport_type == "stdio" {
+        let command_value = transport_source
+            .get("command")
+            .cloned()
+            .ok_or_else(|| mcp_payload_error(command, &format!("{name}.transport.command"), "is required"))?;
+        json!({
+            "type": "stdio",
+            "command": command_value,
+            "args": transport_source.get("args").cloned().unwrap_or_else(|| json!([])),
+            "env": transport_source.get("env").cloned().unwrap_or_else(|| json!({}))
+        })
+    } else {
+        let url = transport_source
+            .get("url")
+            .or_else(|| config.get("url"))
+            .cloned()
+            .ok_or_else(|| mcp_payload_error(command, &format!("{name}.transport.url"), "is required"))?;
+        json!({
+            "type": transport_type,
+            "url": url,
+            "headers": transport_source
+                .get("headers")
+                .or_else(|| config.get("headers"))
+                .cloned()
+                .unwrap_or_else(|| json!({}))
+        })
+    };
+
+    let mut server = Map::new();
+    server.insert("name".into(), Value::String(name.to_owned()));
+    server.insert("transport".into(), transport);
+    for field in ["description", "original_json", "builtin", "enabled"] {
+        if let Some(value) = config.get(field) {
+            server.insert(field.into(), value.clone());
+        }
+    }
+    Ok(Value::Object(server))
+}
+
+fn mcp_payload_error(command: &str, field: &str, reason: &'static str) -> ConfigError {
+    ConfigError::new(ConfigErrorCode::PayloadInvalid, command, reason).field("field", field)
 }
 
 async fn run_mcp_server_update(client: &reqwest::Client) -> Result<(), ConfigError> {
@@ -1438,13 +1594,7 @@ async fn request_json(
             status = status.as_u16(),
             "config CLI backend returned error status"
         );
-        return Err(ConfigError::new(
-            ConfigErrorCode::HttpStatusError,
-            command,
-            "AionUi backend returned an error status",
-        )
-        .field("path", path)
-        .field("status", status.as_u16().to_string()));
+        return Err(config_http_status_error(command, path, status.as_u16(), &text));
     }
 
     if text.trim().is_empty() {
@@ -1484,6 +1634,25 @@ async fn request_json(
         );
     }
     extract_api_data(value, command)
+}
+
+fn config_http_status_error(command: &str, path: &str, status: u16, text: &str) -> ConfigError {
+    let mut error = ConfigError::new(
+        ConfigErrorCode::HttpStatusError,
+        command,
+        "AionUi backend returned an error status",
+    )
+    .field("path", path)
+    .field("status", status.to_string());
+    if let Ok(body) = serde_json::from_str::<Value>(text) {
+        if let Some(code) = body.get("code").and_then(Value::as_str) {
+            error = error.field("backend_code", code);
+        }
+        if let Some(message) = body.get("error").and_then(Value::as_str) {
+            error = error.field("backend_error", message);
+        }
+    }
+    error
 }
 
 fn extract_api_data(value: Value, command: &str) -> Result<Value, ConfigError> {
@@ -1837,5 +2006,79 @@ mod tests {
 
         assert_eq!(payload["user_id"], "user-current");
         assert_eq!(selectors.into_map()["resolved_selectors"]["user_id"], "user-current");
+    }
+
+    #[test]
+    fn mcp_import_normalizes_common_remote_config() {
+        let (payload, warnings) = normalize_mcp_import_payload(
+            json!({
+                "mcp": {
+                    "vision": {
+                        "type": "remote",
+                        "url": "http://localhost:8102/mcp",
+                        "timeout": 300000,
+                        "enabled": true
+                    }
+                }
+            }),
+            "config mcp servers import",
+        )
+        .unwrap();
+
+        assert_eq!(payload["servers"][0]["name"], "vision");
+        assert_eq!(payload["servers"][0]["transport"]["type"], "http");
+        assert_eq!(payload["servers"][0]["transport"]["url"], "http://localhost:8102/mcp");
+        assert_eq!(payload["servers"][0]["enabled"], true);
+        assert_eq!(warnings, ["vision.transport.timeout is unsupported and was ignored"]);
+        let request: aionui_api_types::BatchImportMcpServersRequest = serde_json::from_value(payload).unwrap();
+        assert_eq!(request.servers.len(), 1);
+    }
+
+    #[test]
+    fn mcp_import_normalizes_mcp_servers_and_canonical_arrays() {
+        let (mapped, _) = normalize_mcp_import_payload(
+            json!({ "mcpServers": { "vision": { "url": "http://localhost/mcp" } } }),
+            "config mcp servers import",
+        )
+        .unwrap();
+        assert_eq!(mapped["servers"][0]["transport"]["type"], "http");
+
+        let (canonical, _) = normalize_mcp_import_payload(
+            json!({
+                "servers": [{
+                    "name": "events",
+                    "transport": { "type": "sse", "url": "http://localhost/sse" }
+                }]
+            }),
+            "config mcp servers import",
+        )
+        .unwrap();
+        assert_eq!(canonical["servers"][0]["transport"]["type"], "sse");
+    }
+
+    #[test]
+    fn mcp_import_rejects_unknown_transport_type() {
+        let error = normalize_mcp_import_payload(
+            json!({ "mcp": { "vision": { "type": "websocket", "url": "ws://localhost" } } }),
+            "config mcp servers import",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ConfigErrorCode::PayloadInvalid);
+        assert_eq!(error.fields["field"], "vision.transport.type");
+    }
+
+    #[test]
+    fn http_status_error_preserves_safe_backend_details() {
+        let error = config_http_status_error(
+            "config mcp servers create",
+            "/api/mcp/servers",
+            400,
+            r#"{"success":false,"error":"Invalid JSON request body.","code":"BAD_REQUEST"}"#,
+        );
+
+        assert_eq!(error.fields["backend_code"], "BAD_REQUEST");
+        assert_eq!(error.fields["backend_error"], "Invalid JSON request body.");
+        assert_eq!(error.fields["status"], "400");
     }
 }

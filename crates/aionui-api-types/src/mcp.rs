@@ -27,7 +27,12 @@ pub enum McpTransport {
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         headers: HashMap<String, String>,
     },
-    #[serde(rename = "http")]
+    #[serde(
+        rename = "http",
+        alias = "remote",
+        alias = "streamable_http",
+        alias = "streamable-http"
+    )]
     Http {
         url: String,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -386,6 +391,18 @@ mod tests {
         });
         let result = serde_json::from_value::<CreateMcpServerRequest>(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_request_accepts_common_http_aliases() {
+        for transport_type in ["remote", "streamable_http", "streamable-http"] {
+            let json = serde_json::json!({
+                "name": "test",
+                "transport": { "type": transport_type, "url": "http://localhost/mcp" }
+            });
+            let req: CreateMcpServerRequest = serde_json::from_value(json).unwrap();
+            assert!(matches!(req.transport, McpTransport::Http { .. }));
+        }
     }
 
     // -- UpdateMcpServerRequest -----------------------------------------------
