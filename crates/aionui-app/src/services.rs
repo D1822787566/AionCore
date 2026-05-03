@@ -9,6 +9,7 @@ use aionui_ai_agent::{
     RuntimeTokenService, WorkerTaskManagerImpl, build_agent_factory,
 };
 use aionui_auth::{CookieConfig, JwtService, QrTokenStore, resolve_encryption_secret, resolve_jwt_secret};
+use aionui_baitong::{AdapterLaunch, AdapterSupervisor, BaitongService};
 use aionui_common::OnConversationDelete;
 use aionui_conversation::{ConversationService, runtime_state::ConversationRuntimeStateService};
 use aionui_db::{
@@ -26,6 +27,7 @@ use aionui_session_message::queue::{DeliveryQueue, SystemClock};
 use aionui_session_message::rate_limit::RateLimiter;
 use aionui_session_message::service::{SessionMessageDeps, SessionMessageService};
 use aionui_sidebar::UserOrderDeleteHook;
+use aionui_system::ProviderService;
 use tokio::sync::Notify;
 
 pub struct AppServices {
@@ -65,6 +67,12 @@ pub struct AppServices {
     pub agent_registry: Arc<AgentRegistry>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
+    /// Baitong local adapter bridge. Owns the adapter child process and is the
+    /// single runtime source for its configuration (phase 1).
+    pub baitong_service: Arc<BaitongService>,
+    /// Model provider service, shared by the system router and the Baitong
+    /// managed-provider sink so both see the same repository and key.
+    pub provider_service: ProviderService,
     /// Raw storage-encryption secret string, used to derive the AES-256-GCM
     /// key for at-rest credentials. Decoupled from the JWT signing secret held
     /// by `jwt_service`, so signing can rotate without changing the key.
@@ -163,6 +171,10 @@ impl AppServices {
         // the prefix.
         let backend_binary_path = dunce::canonicalize(&backend_binary_path).unwrap_or(backend_binary_path);
         let data_dir = config.data_dir.clone();
+        // The adapter keeps its own config.ini (credentials + runtime snapshot)
+        // inside a dedicated subdirectory so it never collides with AionCore's
+        // SQLite database or managed resources.
+        let baitong_config_dir = data_dir.join("baitong");
         let work_dir = config.work_dir.clone();
         let identity_mode = config.effective_identity_mode();
         let local = identity_mode.is_local();
@@ -253,6 +265,24 @@ impl AppServices {
 
         let provider_repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
         let event_bus = Arc::new(BroadcastEventBus::new(256));
+        // One instance for both the system router and the Baitong
+        // managed-provider sink: two instances would still share the table, but
+        // splitting the construction is how the two drift on key or repo.
+        let provider_service = ProviderService::new(provider_repo.clone(), encryption_key);
+        // Built before the agent factory because the factory holds it: it reads
+        // the cached vision-MCP endpoint when building a Baitong session.
+        let baitong_service = Arc::new(
+            BaitongService::new(
+                Arc::new(AdapterSupervisor::new(
+                    AdapterLaunch::from_env(),
+                    baitong_config_dir.clone(),
+                )),
+                baitong_config_dir.clone(),
+            )
+            .with_managed_provider(Arc::new(ManagedProviderSink {
+                provider_service: provider_service.clone(),
+            })),
+        );
         // User-configured MCP servers — injected into ACP `session/new`
         // so the agent gets the operator's tools (ELECTRON-1JG fix).
         let mcp_server_repo: Arc<dyn IMcpServerRepository> =
@@ -376,6 +406,7 @@ impl AppServices {
             // back here to raise the user's permission card.
             antigravity_hook_base_url: Some(runtime_base_url.clone()),
             antigravity_hook_tokens: antigravity_hook_tokens.clone(),
+            baitong: Some(baitong_service.clone()),
         });
 
         // Agent factory is now wired. Future extension/custom agents
@@ -428,6 +459,8 @@ impl AppServices {
 
         Ok(Self {
             database,
+            baitong_service,
+            provider_service,
             jwt_service: Arc::new(JwtService::new(secret.clone())),
             antigravity_hook_tokens,
             user_repo,
@@ -465,6 +498,53 @@ impl AppServices {
         })
     }
 }
+
+/// Bridges the Baitong adapter's status into the model-provider table.
+///
+/// The adapter is a single machine-wide child process, so its provider row is
+/// owned by the machine's local user rather than by whoever happened to be
+/// logged into AionUi. Forcing the local user id keeps that true even when the
+/// login request carries a different identity.
+struct ManagedProviderSink {
+    provider_service: ProviderService,
+}
+
+#[async_trait::async_trait]
+impl aionui_baitong::ManagedProviderSink for ManagedProviderSink {
+    async fn upsert(&self, spec: &aionui_baitong::ManagedSpec) -> Result<(), String> {
+        let models: Vec<String> = spec.models.clone();
+        let model_settings: std::collections::HashMap<_, _> = spec
+            .model_settings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.provider_service
+            .upsert_managed(
+                BAITONG_OWNER_USER_ID,
+                aionui_system::ManagedProviderUpsert {
+                    id: aionui_api_types::BAITONG_PROVIDER_ID,
+                    platform: aionui_api_types::BAITONG_PLATFORM,
+                    name: "Baitong",
+                    base_url: &spec.base_url,
+                    api_key: aionui_api_types::BAITONG_API_KEY_SENTINEL,
+                    models: &models,
+                    model_settings: &model_settings,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.provider_service
+            .set_managed_enabled(BAITONG_OWNER_USER_ID, enabled)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Owner of machine-scoped rows: the single local user AionUi runs as.
+const BAITONG_OWNER_USER_ID: &str = "system_default_user";
 
 struct ConversationServiceDeps<'a> {
     database: &'a Database,

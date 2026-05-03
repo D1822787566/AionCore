@@ -55,6 +55,15 @@ pub struct AgentFactoryDeps {
     /// Per-conversation tokens authenticating the permission hook's callback.
     /// Shared with the HTTP endpoint that answers those callbacks.
     pub antigravity_hook_tokens: Arc<crate::antigravity_hook::HookTokenRegistry>,
+    /// Baitong adapter bridge. When present and running, aionrs sessions on the
+    /// built-in Baitong provider get the adapter's vision MCP attached so the
+    /// model can actually read images. `None` in tests and in any composition
+    /// without Baitong.
+    ///
+    /// Held as the concrete service rather than a trait object because the only
+    /// thing the factory needs is the current endpoint, which the service caches
+    /// from its own status snapshots.
+    pub baitong: Option<Arc<aionui_baitong::BaitongService>>,
 }
 
 /// Build a production agent factory that dispatches to concrete agent types.

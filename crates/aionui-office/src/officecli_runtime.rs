@@ -30,7 +30,43 @@ pub(crate) struct OfficecliInstallCommand {
 }
 
 pub(crate) fn resolve_officecli_path() -> Option<PathBuf> {
-    resolve_command_path("officecli").or_else(resolve_known_officecli_install_path)
+    resolve_officecli_with_policy(
+        std::env::var_os("AIONUI_OFFICECLI_PATH"),
+        officecli_is_managed(),
+        || resolve_command_path("officecli").or_else(resolve_known_officecli_install_path),
+    )
+}
+
+fn resolve_officecli_with_policy(
+    configured: Option<OsString>,
+    managed: bool,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(configured) = configured {
+        let configured = PathBuf::from(configured);
+        if configured.is_absolute() && configured.is_file() {
+            return Some(configured);
+        }
+    }
+
+    if managed { None } else { fallback() }
+}
+
+pub(crate) fn officecli_is_managed() -> bool {
+    env_flag_enabled("AIONUI_OFFICECLI_MANAGED")
+}
+
+pub(crate) fn officecli_updates_disabled() -> bool {
+    officecli_is_managed()
+        || env_flag_enabled("AIONUI_OFFICECLI_SKIP_UPDATE")
+        || env_flag_enabled("OFFICECLI_SKIP_UPDATE")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 pub(crate) fn install_command() -> OfficecliInstallCommand {
@@ -137,6 +173,36 @@ mod tests {
     fn write_marker_file(path: &std::path::Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+    }
+
+    #[test]
+    fn configured_binary_takes_priority_over_system_officecli() {
+        let tmp = tempfile::tempdir().unwrap();
+        let configured = tmp.path().join("officecli.exe");
+        write_marker_file(&configured);
+        let result = resolve_officecli_with_policy(Some(configured.clone().into_os_string()), true, || {
+            panic!("managed OfficeCLI must not resolve through system PATH")
+        });
+        assert_eq!(result, Some(configured));
+    }
+
+    #[test]
+    fn managed_missing_or_relative_binary_never_uses_system_officecli() {
+        for configured in [None, Some(OsString::from("missing/officecli.exe"))] {
+            assert_eq!(
+                resolve_officecli_with_policy(configured, true, || panic!("no fallback")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_missing_override_keeps_existing_resolution() {
+        let expected = PathBuf::from("existing-system-officecli");
+        assert_eq!(
+            resolve_officecli_with_policy(Some(OsString::from("missing")), false, || Some(expected.clone())),
+            Some(expected)
+        );
     }
 
     #[test]

@@ -334,6 +334,7 @@ dependencies = [
  "aion-types",
  "aionui-api-types",
  "aionui-auth",
+ "aionui-baitong",
  "aionui-common",
  "aionui-db",
  "aionui-extension",
@@ -393,6 +394,7 @@ dependencies = [
  "aionui-assets",
  "aionui-assistant",
  "aionui-auth",
+ "aionui-baitong",
  "aionui-channel",
  "aionui-common",
  "aionui-conversation",
@@ -510,6 +512,28 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "aionui-baitong"
+version = "0.2.2"
+dependencies = [
+ "aionui-api-types",
+ "aionui-auth",
+ "aionui-common",
+ "aionui-runtime",
+ "async-trait",
+ "axum",
+ "getrandom 0.2.17",
+ "http-body-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
  "tracing",
 ]
 

@@ -10,6 +10,7 @@ mod antigravity_hook;
 mod ask;
 mod assistant;
 mod auth;
+mod baitong;
 mod channel;
 mod chat_file;
 mod confirmation;
@@ -81,6 +82,14 @@ pub use auth::{
     LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest, RevokeExternalSessionRequest,
     RevokeExternalSessionResponse, UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,
     WebuiChangeUsernameResponse, WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
+};
+pub use baitong::{
+    BAITONG_API_KEY_SENTINEL, BAITONG_PLATFORM, BAITONG_PROVIDER_ID, BAITONG_VISION_MCP_NAME, BaitongAdapterAction,
+    BaitongAdapterActionResponse, BaitongAdapterState, BaitongAdapterStatus, BaitongConfigResponse,
+    BaitongConfigSnapshot, BaitongConfigUpdate, BaitongCookieState, BaitongCredentialState, BaitongEnterpriseState,
+    BaitongEnterpriseStatus, BaitongLogEntry, BaitongLoginRequest, BaitongLogsResponse, BaitongMcpSnippetResponse,
+    BaitongModelCatalog, BaitongRefreshResponse, BaitongRefreshStatus, BaitongSessionState, BaitongSessionStatus,
+    BaitongStatusResponse, BaitongVisionCatalog,
 };
 pub use channel::{
     ApprovePairingRequest, BridgeResponse, ChannelAssistantSettingRequest, ChannelAssistantSettingResponse,

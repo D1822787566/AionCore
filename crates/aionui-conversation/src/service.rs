@@ -1129,7 +1129,17 @@ impl ConversationService {
         user_id: &str,
         req: CreateConversationRequest,
     ) -> Result<ConversationResponse, ConversationError> {
-        let id = generate_short_id();
+        let id = match req.id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) if id.len() <= 128 && !id.contains('/') && !id.contains('\\') && !id.contains("..") => {
+                id.to_owned()
+            }
+            Some(_) => {
+                return Err(ConversationError::BadRequest {
+                    reason: "conversation id contains invalid characters".to_owned(),
+                });
+            }
+            None => generate_short_id(),
+        };
         let now = now_ms();
         let source = req.source.unwrap_or(ConversationSource::Aionui);
 

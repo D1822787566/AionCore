@@ -23,6 +23,7 @@ use aionui_auth::{
     AuthIdentityMode, AuthRouterState, AuthState, IRuntimeTokenVerifier, RefreshCoalescer,
     SystemDefaultFilesystemAdopter, auth_middleware, auth_routes, csrf_middleware, security_headers_middleware,
 };
+use aionui_baitong::baitong_routes;
 use aionui_channel::channel_routes;
 #[cfg(feature = "weixin")]
 use aionui_channel::weixin_login_route;
@@ -281,6 +282,11 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     let system_authenticated =
         system_routes(states.system).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    // Baitong local-adapter routes protected by auth middleware. AionUi reaches
+    // the adapter only through these routes.
+    let baitong_authenticated =
+        baitong_routes(states.baitong.clone()).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
     // Conversation routes protected by auth middleware
     let conversation_authenticated = conversation_routes(states.conversation.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -400,6 +406,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(antigravity_hook)
         .route("/health", get(health_check))
         .merge(auth_routes(auth_state))
+        .merge(baitong_authenticated)
         .merge(system_authenticated)
         .merge(conversation_authenticated)
         .merge(conversation_ops_authenticated)

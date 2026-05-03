@@ -9,7 +9,10 @@ use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 use crate::error::OfficeError;
-use crate::officecli_runtime::{OFFICECLI_LATEST_RELEASE_URL, install_command, resolve_officecli_path};
+use crate::officecli_runtime::{
+    OFFICECLI_LATEST_RELEASE_URL, install_command, officecli_is_managed, officecli_updates_disabled,
+    resolve_officecli_path,
+};
 use crate::port::{allocate_port, is_port_listening};
 use crate::types::DocType;
 
@@ -196,6 +199,7 @@ impl OfficecliWatchManager {
     ) -> Result<Box<dyn ProcessHandle>, OfficeError> {
         match self.spawner.spawn_officecli(resolved, port, doc_type).await {
             Ok(process) => Ok(process),
+            Err(OfficeError::OfficecliNotFound) if officecli_is_managed() => Err(OfficeError::OfficecliNotFound),
             Err(OfficeError::OfficecliNotFound) => {
                 self.broadcast_status_for_user(user_id, doc_type, PreviewState::Installing, None);
                 self.spawner.install_officecli().await?;
@@ -315,6 +319,10 @@ impl OfficecliWatchManager {
     }
 
     async fn maybe_check_update(&self, doc_type: DocType) {
+        if officecli_updates_disabled() {
+            return;
+        }
+
         let mut last = self.last_version_check.lock().await;
         let should_check = match *last {
             Some(t) => t.elapsed() >= VERSION_CHECK_INTERVAL,
@@ -436,6 +444,9 @@ impl ProcessSpawner for DefaultProcessSpawner {
     }
 
     async fn install_officecli(&self) -> Result<(), OfficeError> {
+        if officecli_is_managed() {
+            return Err(OfficeError::OfficecliNotFound);
+        }
         let command = install_command();
         tracing::info!(
             platform = std::env::consts::OS,
@@ -468,6 +479,10 @@ impl ProcessSpawner for DefaultProcessSpawner {
     }
 
     async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
+        if officecli_updates_disabled() {
+            return Ok(());
+        }
+
         let officecli = resolve_officecli_path().ok_or(OfficeError::OfficecliNotFound)?;
         if !officecli_supports_watch(&officecli).await {
             return Err(OfficeError::OfficecliNotFound);

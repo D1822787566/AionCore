@@ -11,6 +11,7 @@ use aionui_assistant::{
     AssistantAgentCatalogPort, AssistantError, AssistantRouterState, AssistantService, BuiltinAssistantRegistry,
 };
 use aionui_auth::extract_token_from_ws_headers;
+use aionui_baitong::BaitongRouterState;
 use aionui_channel::ChannelRouterState;
 use aionui_common::AgentKillReason;
 use aionui_conversation::{ConversationRouterState, ConversationService};
@@ -45,8 +46,7 @@ use aionui_sidebar::{ArchiveTeardownPorts, SidebarRouterState, SidebarService};
 use aionui_skill_runtime::{SkillRuntimeRouterState, SkillRuntimeService};
 use aionui_system::{
     ClientPrefService, ConnectionTestRouterState, ConnectionTestService, FeedbackDiagnosticsService, ModelFetchService,
-    ProtocolDetectionService, ProviderService, RuntimePrepareService, SettingsService, SystemRouterState,
-    VersionCheckService,
+    ProtocolDetectionService, RuntimePrepareService, SettingsService, SystemRouterState, VersionCheckService,
 };
 use aionui_team::{
     AgentTurnCancellationPort, AgentTurnExecutionPort, NativeSlashCommandPort, TeamAssistantCatalogEntry,
@@ -128,6 +128,7 @@ impl std::error::Error for RouterBuildError {
 /// Reduces parameter bloat on router constructors and makes it easy for
 /// tests to override individual modules.
 pub struct ModuleStates {
+    pub baitong: BaitongRouterState,
     pub system: SystemRouterState,
     pub conversation: ConversationRouterState,
     pub remote_agent: RemoteAgentRouterState,
@@ -298,6 +299,9 @@ pub async fn build_module_states(
         "startup: module states bundle started"
     );
     let states = ModuleStates {
+        baitong: BaitongRouterState {
+            service: services.baitong_service.clone(),
+        },
         system: build_module_state_phase(&boot, "system", || build_system_state(services)),
         conversation: build_module_state_phase(&boot, "conversation", || {
             build_conversation_state(
@@ -492,7 +496,10 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     SystemRouterState {
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone()))),
         client_pref_service,
-        provider_service: ProviderService::new(provider_repo.clone(), encryption_key),
+        // Shared instance: the Baitong managed-provider sink writes through the
+        // same service, so a config save and a login cannot disagree about the
+        // row's ownership or the encryption key.
+        provider_service: services.provider_service.clone(),
         model_fetch_service: ModelFetchService::new(provider_repo, encryption_key, http_client.clone()),
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, env!("CARGO_PKG_VERSION").to_owned()),

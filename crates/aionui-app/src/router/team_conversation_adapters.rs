@@ -455,6 +455,7 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
                     }),
                     source: None,
                     channel_chat_id: None,
+                    id: None,
                     extra: request.extra,
                 },
             )

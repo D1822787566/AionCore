@@ -256,6 +256,7 @@ impl ConversationService {
             }),
             source: Some(ConversationSource::Aionui),
             channel_chat_id: None,
+            id: None,
             extra: Value::Object(extra),
         };
 

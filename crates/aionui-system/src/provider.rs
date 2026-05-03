@@ -1,12 +1,30 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aionui_api_types::{CreateProviderRequest, ProviderResponse, UpdateProviderRequest};
+use aionui_api_types::{
+    BAITONG_PROVIDER_ID, CreateProviderRequest, ModelSettings, ProviderResponse, UpdateProviderRequest,
+};
 use aionui_common::{decrypt_string, encrypt_string};
 use aionui_db::{CreateProviderParams, IProviderRepository, UpdateProviderParams, models::Provider};
 use serde::de::DeserializeOwned;
 
 use crate::error::SystemError;
+
+/// Row content AionCore owns for the built-in Baitong provider.
+///
+/// Deliberately primitive: `aionui-system` must not depend on
+/// `aionui-baitong`. The caller (`aionui-app`) translates the adapter's status
+/// into this shape.
+#[derive(Debug, Clone)]
+pub struct ManagedProviderUpsert<'a> {
+    pub id: &'a str,
+    pub platform: &'a str,
+    pub name: &'a str,
+    pub base_url: &'a str,
+    pub api_key: &'a str,
+    pub models: &'a [String],
+    pub model_settings: &'a HashMap<String, ModelSettings>,
+}
 
 /// Business logic for model provider CRUD with API key encryption/masking.
 #[derive(Clone)]
@@ -34,6 +52,16 @@ impl ProviderService {
     /// ids must be preserved.
     pub async fn create(&self, user_id: &str, req: CreateProviderRequest) -> Result<ProviderResponse, SystemError> {
         validate_create_request(&req)?;
+
+        // Reserved id. `upsert_managed` is the only writer of this row, and
+        // `delete` refuses it, so a user-created row under this id would be
+        // stuck: unremovable from the UI, and pointing at whatever endpoint
+        // the create call named until the next Baitong publish overwrote it.
+        if req.id.as_deref().map(str::trim) == Some(BAITONG_PROVIDER_ID) {
+            return Err(SystemError::BadRequest(
+                "baitong-builtin is managed by AionCore and cannot be created manually".into(),
+            ));
+        }
 
         let encrypted_key = encrypt_string(&req.api_key, &self.encryption_key)?;
         let models_json = serialize_json(&req.models, "models")?;
@@ -75,6 +103,25 @@ impl ProviderService {
         id: &str,
         req: UpdateProviderRequest,
     ) -> Result<ProviderResponse, SystemError> {
+        // The built-in row is content-owned by the adapter's status. The
+        // frontend's provider editor sends a full row back on every toggle, so
+        // this guard cannot live at the route: dropping the managed fields here
+        // is what keeps a model-enable click from rewriting the model catalog or
+        // the base URL. `enabled` and `model_enabled` stay honoured — those are
+        // the user's own choices.
+        let req = if id == BAITONG_PROVIDER_ID {
+            UpdateProviderRequest {
+                enabled: req.enabled,
+                model_enabled: req.model_enabled,
+                // Health-check results are the user's own probes, not adapter
+                // content, so they pass through and get pruned on refresh.
+                model_health: req.model_health,
+                ..UpdateProviderRequest::default()
+            }
+        } else {
+            req
+        };
+
         validate_update_request(&req)?;
 
         let encrypted_key = req
@@ -113,7 +160,137 @@ impl ProviderService {
 
     /// Delete a provider by ID.
     pub async fn delete(&self, user_id: &str, id: &str) -> Result<(), SystemError> {
+        // Content-owned row: deleting it would leave Baitong logged in with no
+        // model provider until the next login republished it. Logout is the
+        // supported way to remove it from the picker.
+        if id == BAITONG_PROVIDER_ID {
+            return Err(SystemError::BadRequest(
+                "baitong-builtin is managed by AionCore and cannot be deleted".into(),
+            ));
+        }
         self.repo.delete(user_id, id).await?;
+        Ok(())
+    }
+
+    /// Create or refresh the built-in provider row from adapter-owned content.
+    ///
+    /// Skips the write entirely when the stored row already matches
+    /// `models` / `model_settings` / `base_url`, so repeated logins do not bump
+    /// `updated_at` or push a needless provider event.
+    ///
+    /// `model_enabled` is preserved for models that still exist and dropped for
+    /// models that left the catalog; a new model defaults to enabled.
+    pub async fn upsert_managed(&self, user_id: &str, spec: ManagedProviderUpsert<'_>) -> Result<(), SystemError> {
+        let models_json = serialize_json(&spec.models.to_vec(), "models")?;
+        let model_settings_json = serialize_json(spec.model_settings, "model_settings")?;
+        let encrypted_key = encrypt_string(spec.api_key, &self.encryption_key)?;
+
+        let existing = self.repo.find_by_id(user_id, spec.id).await?;
+
+        let Some(row) = existing else {
+            let capabilities_json = serialize_json(&Vec::<aionui_api_types::ModelCapability>::new(), "capabilities")?;
+            self.repo
+                .create(CreateProviderParams {
+                    id: Some(spec.id),
+                    user_id,
+                    platform: spec.platform,
+                    name: spec.name,
+                    base_url: spec.base_url,
+                    api_key_encrypted: &encrypted_key,
+                    models: &models_json,
+                    enabled: true,
+                    capabilities: &capabilities_json,
+                    context_limit: None,
+                    model_protocols: None,
+                    model_enabled: None,
+                    model_health: None,
+                    model_settings: &model_settings_json,
+                    bedrock_config: None,
+                    is_full_url: false,
+                })
+                .await?;
+            return Ok(());
+        };
+
+        // Content comparison. `model_settings` is compared as parsed JSON so
+        // key order in the serialized form can never cause a false "changed".
+        let stored_models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
+        let stored_settings: HashMap<String, ModelSettings> =
+            serde_json::from_str(&row.model_settings).unwrap_or_default();
+        let content_unchanged = stored_models == *spec.models
+            && stored_settings == *spec.model_settings
+            && row.base_url == spec.base_url
+            && row.platform == spec.platform;
+        if content_unchanged {
+            return Ok(());
+        }
+
+        let pruned_enabled = prune_model_enabled(&row.model_enabled, spec.models);
+        let pruned_health = prune_keys(&row.model_health, spec.models);
+
+        self.repo
+            .update(
+                user_id,
+                spec.id,
+                UpdateProviderParams {
+                    platform: Some(spec.platform),
+                    name: Some(spec.name),
+                    base_url: Some(spec.base_url),
+                    api_key_encrypted: Some(&encrypted_key),
+                    models: Some(&models_json),
+                    // `enabled` is the user's switch; content refresh must not
+                    // flip it. Login/logout do that through `set_managed_enabled`.
+                    enabled: None,
+                    capabilities: None,
+                    context_limit: None,
+                    model_protocols: None,
+                    // `None` here means "leave the column alone": when the row
+                    // had no per-model map there is nothing to prune, and
+                    // writing an empty object would be a spurious change.
+                    model_enabled: pruned_enabled.as_ref().map(|json| Some(json.as_str())),
+                    model_health: pruned_health.as_ref().map(|json| Some(json.as_str())),
+                    model_settings: Some(&model_settings_json),
+                    bedrock_config: None,
+                    is_full_url: Some(false),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Set `enabled` on the built-in provider row without touching its content.
+    ///
+    /// A no-op when the row does not exist yet: "enable" before any successful
+    /// login has nothing to enable, and "disable" already is the desired state.
+    pub async fn set_managed_enabled(&self, user_id: &str, enabled: bool) -> Result<(), SystemError> {
+        let Some(row) = self.repo.find_by_id(user_id, BAITONG_PROVIDER_ID).await? else {
+            return Ok(());
+        };
+        if row.enabled == enabled {
+            return Ok(());
+        }
+        self.repo
+            .update(
+                user_id,
+                BAITONG_PROVIDER_ID,
+                UpdateProviderParams {
+                    platform: None,
+                    name: None,
+                    base_url: None,
+                    api_key_encrypted: None,
+                    models: None,
+                    enabled: Some(enabled),
+                    capabilities: None,
+                    context_limit: None,
+                    model_protocols: None,
+                    model_enabled: None,
+                    model_health: None,
+                    model_settings: None,
+                    bedrock_config: None,
+                    is_full_url: None,
+                },
+            )
+            .await?;
         Ok(())
     }
 
@@ -207,6 +384,31 @@ pub(crate) fn deserialize_opt<T: DeserializeOwned>(
         .map(serde_json::from_str)
         .transpose()
         .map_err(|e| SystemError::Internal(format!("Failed to parse {field} JSON: {e}")))
+}
+
+/// Keep only the `model_enabled` entries whose model is still in the catalog.
+///
+/// Returns `None` when the row had no per-model map: writing one back would turn
+/// "unset" into "all explicitly true", which is a different state.
+fn prune_model_enabled(stored: &Option<String>, models: &[String]) -> Option<String> {
+    let map: HashMap<String, bool> = stored.as_deref().and_then(|json| serde_json::from_str(json).ok())?;
+    let pruned: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .filter(|(model, _)| models.iter().any(|kept| kept == model))
+        .map(|(model, enabled)| (model, serde_json::Value::Bool(enabled)))
+        .collect();
+    serde_json::to_string(&pruned).ok()
+}
+
+/// Generic version of [`prune_model_enabled`] for any per-model object map.
+fn prune_keys(stored: &Option<String>, models: &[String]) -> Option<String> {
+    let map: serde_json::Map<String, serde_json::Value> =
+        stored.as_deref().and_then(|json| serde_json::from_str(json).ok())?;
+    let pruned: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .filter(|(model, _)| models.iter().any(|kept| kept == model))
+        .collect();
+    serde_json::to_string(&pruned).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +900,261 @@ mod tests {
         let svc = setup().await;
         let err = svc.delete(TEST_USER_ID, "no_such_id").await.unwrap_err();
         assert!(matches!(err, SystemError::NotFound(_)));
+    }
+
+    // -- built-in Baitong provider --
+
+    /// Owns the strings a managed spec borrows, so tests can build one inline
+    /// without leaking or threading lifetimes through every call.
+    struct ManagedFixture {
+        base_url: String,
+        models: Vec<String>,
+        model_settings: HashMap<String, ModelSettings>,
+    }
+
+    impl ManagedFixture {
+        fn new(base_url: &str, models: &[&str]) -> Self {
+            let models: Vec<String> = models.iter().map(|m| (*m).to_string()).collect();
+            let model_settings = models
+                .iter()
+                .map(|model| {
+                    (
+                        model.clone(),
+                        ModelSettings {
+                            image_input: Some(aionui_api_types::ModelImageInputCapability::Supported),
+                            openai_api_mode: None,
+                        },
+                    )
+                })
+                .collect();
+            Self {
+                base_url: base_url.to_string(),
+                models,
+                model_settings,
+            }
+        }
+
+        fn spec(&self) -> ManagedProviderUpsert<'_> {
+            ManagedProviderUpsert {
+                id: aionui_api_types::BAITONG_PROVIDER_ID,
+                platform: aionui_api_types::BAITONG_PLATFORM,
+                name: "Baitong",
+                base_url: &self.base_url,
+                api_key: aionui_api_types::BAITONG_API_KEY_SENTINEL,
+                models: &self.models,
+                model_settings: &self.model_settings,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_upsert_creates_an_enabled_row_with_the_fixed_id() {
+        let svc = setup().await;
+        let fixture = ManagedFixture::new("http://127.0.0.1:8102/v1", &["DeepSeek-V4-Flash"]);
+        svc.upsert_managed(TEST_USER_ID, fixture.spec()).await.unwrap();
+
+        let all = svc.list(TEST_USER_ID).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, aionui_api_types::BAITONG_PROVIDER_ID);
+        assert_eq!(all[0].platform, aionui_api_types::BAITONG_PLATFORM);
+        assert!(all[0].enabled, "a fresh managed row starts enabled");
+        assert_eq!(all[0].models, fixture.models);
+        // The sentinel is stored encrypted and decrypted on read like any key.
+        assert_eq!(all[0].api_key, aionui_api_types::BAITONG_API_KEY_SENTINEL);
+        assert!(!all[0].is_full_url);
+        assert_eq!(
+            all[0].model_settings["DeepSeek-V4-Flash"].image_input,
+            Some(aionui_api_types::ModelImageInputCapability::Supported)
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_upsert_skips_the_write_when_content_is_identical() {
+        let svc = setup().await;
+        let fixture = ManagedFixture::new("http://127.0.0.1:8102/v1", &["m1", "m2"]);
+        svc.upsert_managed(TEST_USER_ID, fixture.spec()).await.unwrap();
+        let first = svc.list(TEST_USER_ID).await.unwrap()[0].clone();
+
+        // A second identical publish must not touch `updated_at`; otherwise every
+        // login/refresh would look like a change to the UI and the database.
+        svc.upsert_managed(TEST_USER_ID, fixture.spec()).await.unwrap();
+        let second = svc.list(TEST_USER_ID).await.unwrap()[0].clone();
+
+        assert_eq!(first.updated_at, second.updated_at);
+    }
+
+    #[tokio::test]
+    async fn managed_upsert_keeps_user_model_toggles_and_drops_removed_models() {
+        let svc = setup().await;
+        let first = ManagedFixture::new("http://127.0.0.1:8102/v1", &["m1", "m2"]);
+        svc.upsert_managed(TEST_USER_ID, first.spec()).await.unwrap();
+
+        // The user turns `m1` off. A user write may set `model_enabled`.
+        svc.update(
+            TEST_USER_ID,
+            aionui_api_types::BAITONG_PROVIDER_ID,
+            UpdateProviderRequest {
+                model_enabled: Some(HashMap::from([("m1".to_string(), false), ("m2".to_string(), true)])),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // The adapter drops `m2`. The row must follow the new catalog and keep
+        // the user's `m1 = false`.
+        let next = ManagedFixture::new("http://127.0.0.1:8102/v1", &["m1", "m3"]);
+        svc.upsert_managed(TEST_USER_ID, next.spec()).await.unwrap();
+
+        let row = svc.list(TEST_USER_ID).await.unwrap().remove(0);
+        assert_eq!(row.models, next.models);
+        let enabled = row.model_enabled.expect("model_enabled");
+        assert_eq!(enabled.get("m1"), Some(&false), "user's off toggle survives");
+        assert!(!enabled.contains_key("m2"), "removed model is pruned");
+        assert!(!enabled.contains_key("m3"), "new model has no explicit entry");
+    }
+
+    #[tokio::test]
+    async fn managed_delete_is_rejected() {
+        let svc = setup().await;
+        let fixture = ManagedFixture::new("http://127.0.0.1:8102/v1", &["m1"]);
+        svc.upsert_managed(TEST_USER_ID, fixture.spec()).await.unwrap();
+
+        let error = svc
+            .delete(TEST_USER_ID, aionui_api_types::BAITONG_PROVIDER_ID)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SystemError::BadRequest(_)));
+        assert_eq!(svc.list(TEST_USER_ID).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_create_cannot_claim_the_managed_id() {
+        // `delete` refuses the id, so a user-created row under it would be
+        // stuck in the list with an attacker-named endpoint until the next
+        // Baitong publish overwrote it. Create must refuse first.
+        let svc = setup().await;
+
+        let error = svc
+            .create(
+                TEST_USER_ID,
+                CreateProviderRequest {
+                    id: Some(aionui_api_types::BAITONG_PROVIDER_ID.into()),
+                    platform: "openai".into(),
+                    name: "Squatter".into(),
+                    base_url: "https://attacker.example/v1".into(),
+                    api_key: "sk-user".into(),
+                    models: vec!["hijacked".into()],
+                    enabled: true,
+                    capabilities: vec![],
+                    context_limit: None,
+                    model_protocols: None,
+                    model_enabled: None,
+                    model_health: None,
+                    model_settings: HashMap::new(),
+                    bedrock_config: None,
+                    is_full_url: false,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SystemError::BadRequest(_)));
+        assert!(svc.list(TEST_USER_ID).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_create_guard_allows_other_ids() {
+        // Guard is id-scoped: the migration path that supplies user-chosen ids
+        // must keep working for every id except the reserved one.
+        let svc = setup().await;
+
+        svc.create(
+            TEST_USER_ID,
+            CreateProviderRequest {
+                id: Some("a1b2c3d4".into()),
+                platform: "openai".into(),
+                name: "Mine".into(),
+                base_url: "https://api.example.com/v1".into(),
+                api_key: "sk-user".into(),
+                models: vec!["m".into()],
+                enabled: true,
+                capabilities: vec![],
+                context_limit: None,
+                model_protocols: None,
+                model_enabled: None,
+                model_health: None,
+                model_settings: HashMap::new(),
+                bedrock_config: None,
+                is_full_url: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(svc.list(TEST_USER_ID).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_update_cannot_rewrite_managed_content() {
+        let svc = setup().await;
+        let fixture = ManagedFixture::new("http://127.0.0.1:8102/v1", &["m1"]);
+        svc.upsert_managed(TEST_USER_ID, fixture.spec()).await.unwrap();
+
+        // The frontend editor sends a full row back on every toggle. Nothing
+        // except `enabled` / `model_enabled` may land.
+        let row = svc
+            .update(
+                TEST_USER_ID,
+                aionui_api_types::BAITONG_PROVIDER_ID,
+                UpdateProviderRequest {
+                    platform: Some("evil".into()),
+                    name: Some("Renamed".into()),
+                    base_url: Some("http://attacker.example/v1".into()),
+                    api_key: Some("sk-user-key".into()),
+                    models: Some(vec!["hijacked".into()]),
+                    enabled: Some(false),
+                    is_full_url: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(row.platform, aionui_api_types::BAITONG_PLATFORM);
+        assert_eq!(row.name, "Baitong");
+        assert_eq!(row.base_url, "http://127.0.0.1:8102/v1");
+        assert_eq!(row.api_key, aionui_api_types::BAITONG_API_KEY_SENTINEL);
+        assert_eq!(row.models, fixture.models);
+        assert!(!row.is_full_url);
+        // The two user-owned switches still work.
+        assert!(!row.enabled);
+    }
+
+    #[tokio::test]
+    async fn managed_enable_is_a_noop_before_the_row_exists() {
+        let svc = setup().await;
+
+        // Startup restore can fire before any login ever published the row.
+        svc.set_managed_enabled(TEST_USER_ID, true).await.unwrap();
+
+        assert!(svc.list(TEST_USER_ID).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn logout_disables_and_relogin_reenables_without_touching_content() {
+        let svc = setup().await;
+        let fixture = ManagedFixture::new("http://127.0.0.1:8102/v1", &["m1"]);
+        svc.upsert_managed(TEST_USER_ID, fixture.spec()).await.unwrap();
+
+        svc.set_managed_enabled(TEST_USER_ID, false).await.unwrap();
+        let off = svc.list(TEST_USER_ID).await.unwrap().remove(0);
+        assert!(!off.enabled);
+        assert_eq!(off.models, fixture.models, "disable must not clear the catalog");
+
+        svc.set_managed_enabled(TEST_USER_ID, true).await.unwrap();
+        assert!(svc.list(TEST_USER_ID).await.unwrap()[0].enabled);
     }
 }
 

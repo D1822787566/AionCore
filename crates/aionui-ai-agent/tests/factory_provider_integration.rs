@@ -96,6 +96,9 @@ fn make_factory(
         // Antigravity permission path.
         antigravity_hook_base_url: None,
         antigravity_hook_tokens: Arc::new(aionui_ai_agent::antigravity_hook::HookTokenRegistry::new()),
+        // No Baitong adapter in these tests; the managed provider path is
+        // covered by `aionui-baitong`'s own contract tests.
+        baitong: None,
     })
 }
 

@@ -1,0 +1,24 @@
+[package]
+name = "aionui-baitong"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aionui-api-types.workspace = true
+aionui-auth.workspace = true
+aionui-common.workspace = true
+aionui-runtime.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
+http-body-util.workspace = true

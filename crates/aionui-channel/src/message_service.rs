@@ -181,6 +181,7 @@ impl ChannelMessageService {
             }),
             source: Some(source),
             channel_chat_id: session.chat_id.clone(),
+            id: None,
             extra,
         };
 

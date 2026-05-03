@@ -609,6 +609,7 @@ impl JobExecutor {
             assistant,
             source: None,
             channel_chat_id: None,
+            id: None,
             extra,
         };
 

@@ -91,6 +91,14 @@ pub(super) async fn build(
         &skill_index_text(&deps, &ctx.user_id, &resolved_skills).await,
     );
 
+    let provider_id = &model.provider_id;
+    let row = deps
+        .provider_repo
+        .find_by_id(&ctx.user_id, provider_id)
+        .await
+        .map_err(|e| AgentError::internal(format!("Failed to load provider config: {e}")))?
+        .ok_or_else(|| AgentError::bad_request(format!("Provider '{provider_id}' not found")))?;
+
     let mut extra_mcp_servers = resolve_mcp_servers(&overrides);
     if let Some(repo) = deps.mcp_server_repo.as_ref() {
         for (name, config) in load_user_mcp_servers(
@@ -114,6 +122,19 @@ pub(super) async fn build(
     )
     .await;
 
+    // Lowest priority: a user who already added their own `vision` server keeps
+    // theirs. Only the built-in Baitong provider gets this, and only while the
+    // adapter reports the vision MCP switch on. Without it aionrs marks the
+    // model image-capable and keeps `ViewImage`, but the upstream model is
+    // text-only and can only "see" through the adapter's `look_at_image` tool.
+    let vision = match deps.baitong.as_ref() {
+        Some(baitong) if row.platform == aionui_api_types::BAITONG_PLATFORM => baitong.vision_mcp().await,
+        _ => None,
+    };
+    if let Some((name, config)) = baitong_vision_mcp_server(vision) {
+        extra_mcp_servers.entry(name).or_insert(config);
+    }
+
     if !extra_mcp_servers.is_empty() {
         info!(
             conversation_id = %ctx.conversation_id,
@@ -122,14 +143,6 @@ pub(super) async fn build(
             "Injecting MCP servers into aionrs session"
         );
     }
-
-    let provider_id = &model.provider_id;
-    let row = deps
-        .provider_repo
-        .find_by_id(&ctx.user_id, provider_id)
-        .await
-        .map_err(|e| AgentError::internal(format!("Failed to load provider config: {e}")))?
-        .ok_or_else(|| AgentError::bad_request(format!("Provider '{provider_id}' not found")))?;
 
     let api_key = aionui_common::decrypt_string(&row.api_key_encrypted, &deps.encryption_key)
         .map_err(|e| AgentError::internal(e.to_string()))?;
@@ -513,6 +526,33 @@ pub(crate) fn resolve_model_compat_overrides(
             ModelOpenAiApiMode::Responses => OpenAiApiMode::Responses,
         }),
     })
+}
+
+/// The MCP server entry that lets a Baitong session actually read images.
+///
+/// `None` when the adapter is down or the vision switch is off: half a
+/// configuration (a URL for a closed port, or a tool list the user disabled) is
+/// worse than none, because session startup would spend the connect timeout
+/// discovering it.
+fn baitong_vision_mcp_server(vision: Option<aionui_baitong::VisionMcp>) -> Option<(String, McpServerConfig)> {
+    let vision = vision.filter(|vision| vision.enabled)?;
+    Some((
+        aionui_api_types::BAITONG_VISION_MCP_NAME.to_owned(),
+        McpServerConfig {
+            transport: TransportType::StreamableHttp,
+            command: None,
+            args: None,
+            env: None,
+            url: Some(vision.url),
+            headers: Some(HashMap::new()),
+            // Eager, not deferred: the model needs to see `look_at_image` exists
+            // in the same turn it receives an image, not after a stub round-trip.
+            deferred: Some(false),
+            // The adapter serves `/mcp` from the same uvicorn process that loads
+            // the vision stack, which can exceed the 30s default on a cold start.
+            startup_timeout_ms: Some(60_000),
+        },
+    ))
 }
 
 fn resolve_model_protocol(model_id: &str, model_protocols: Option<&str>) -> Result<String, AgentError> {
@@ -2401,5 +2441,41 @@ mod tests {
         }
 
         assert_eq!(overrides.system_prompt.as_deref(), Some("Be concise."));
+    }
+
+    // -- Baitong vision MCP --
+
+    #[test]
+    fn vision_mcp_entry_is_an_eager_streamable_http_server() {
+        let vision = aionui_baitong::VisionMcp {
+            url: "http://127.0.0.1:8102/mcp".to_string(),
+            enabled: true,
+        };
+
+        let (name, config) = baitong_vision_mcp_server(Some(vision)).expect("server");
+
+        assert_eq!(name, aionui_api_types::BAITONG_VISION_MCP_NAME);
+        assert!(matches!(config.transport, TransportType::StreamableHttp));
+        assert_eq!(config.url.as_deref(), Some("http://127.0.0.1:8102/mcp"));
+        // Deferred tools are name-only stubs; a text-only upstream model would
+        // never learn `look_at_image` takes a question string before calling it.
+        assert_eq!(config.deferred, Some(false));
+        // Cold start of the adapter's uvicorn process can exceed the 30s default.
+        assert_eq!(config.startup_timeout_ms, Some(60_000));
+    }
+
+    #[test]
+    fn vision_mcp_is_absent_when_the_adapter_switch_is_off() {
+        let vision = aionui_baitong::VisionMcp {
+            url: "http://127.0.0.1:8102/mcp".to_string(),
+            enabled: false,
+        };
+        assert!(baitong_vision_mcp_server(Some(vision)).is_none());
+    }
+
+    #[test]
+    fn vision_mcp_is_absent_when_the_endpoint_is_unknown() {
+        // Stopped adapter / never observed: no URL to dial.
+        assert!(baitong_vision_mcp_server(None).is_none());
     }
 }

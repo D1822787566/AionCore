@@ -1862,6 +1862,17 @@ async fn create_returns_conversation_with_defaults() {
     assert_eq!(events[0].data["source"], "aionui");
 }
 
+#[tokio::test]
+async fn create_uses_client_reserved_id_when_valid() {
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let mut req = make_create_req();
+    req.id = Some("draft-conversation-123".to_owned());
+
+    let resp = svc.create("user_1", req).await.unwrap();
+
+    assert_eq!(resp.id, "draft-conversation-123");
+}
+
 // ── Project-bind side branch tests ─────────────────────────────────
 
 async fn make_injected_project_service(temp_root: &std::path::Path) -> std::sync::Arc<aionui_project::ProjectService> {

@@ -340,6 +340,9 @@ pub(crate) async fn run_server(
     );
     let conversation_runtime_state = services.conversation_runtime_state.clone();
     let worker_task_manager = services.worker_task_manager.clone();
+    // The Baitong adapter is a child of this process. It must be reaped before
+    // exit, otherwise a restart leaves an orphan holding the model port.
+    let baitong_service = services.baitong_service.clone();
     let client_pref_service = router_runtime.client_pref_service.clone();
 
     // All initialization is complete and we are about to begin serving. Emit the
@@ -408,6 +411,17 @@ pub(crate) async fn run_server(
                             timeout_secs = WORKER_TASK_SHUTDOWN_TIMEOUT.as_secs(),
                             active_task_count,
                             "worker task manager shutdown timed out"
+                        ),
+                    }
+                    // Bounded like every other stage: a wedged adapter must not
+                    // keep the data-dir instance lock alive past the watchdog.
+                    match tokio::time::timeout(WORKER_TASK_SHUTDOWN_TIMEOUT, baitong_service.shutdown()).await {
+                        Ok(()) => info!(stage = "shutdown.baitong_adapter", "baitong adapter shutdown completed"),
+                        Err(_) => warn!(
+                            code = "BOOTSTRAP_SHUTDOWN_STAGE_TIMEOUT",
+                            stage = "shutdown.baitong_adapter",
+                            timeout_secs = WORKER_TASK_SHUTDOWN_TIMEOUT.as_secs(),
+                            "baitong adapter shutdown timed out"
                         ),
                     }
                 }

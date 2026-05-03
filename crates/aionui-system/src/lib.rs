@@ -22,7 +22,7 @@ pub use error::SystemError;
 pub use keep_awake::{KeepAwakeController, NoopKeepAwakeController, SystemKeepAwakeController};
 pub use model_fetcher::ModelFetchService;
 pub use protocol::ProtocolDetectionService;
-pub use provider::ProviderService;
+pub use provider::{ManagedProviderUpsert, ProviderService};
 pub use routes::{SystemRouterState, settings_routes, system_routes};
 pub use runtime_prepare::RuntimePrepareService;
 pub use settings::SettingsService;

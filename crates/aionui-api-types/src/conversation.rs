@@ -77,6 +77,10 @@ pub struct AssistantConversationRequest {
 /// Body for `POST /api/conversations`.
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationRequest {
+    /// Optional client-reserved identity used to bind pre-conversation uploads
+    /// to the conversation created on the first send.
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub r#type: Option<AgentType>,
     pub name: Option<String>,
