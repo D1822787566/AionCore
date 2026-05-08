@@ -952,6 +952,52 @@ pub async fn rollback_capability_platform_skill_for_user(
     Ok(backup)
 }
 
+/// Remove a capability-factory Skill and its retained rollback snapshot.
+pub async fn uninstall_capability_platform_skill_with_repo_for_user(
+    paths: &SkillPaths,
+    repo: &dyn ISkillRepository,
+    user_id: &str,
+    skill_name: &str,
+) -> Result<(), ExtensionError> {
+    validate_filename(skill_name)?;
+    let Some(row) = repo.find_by_name_for_user(user_id, skill_name).await? else {
+        return Ok(());
+    };
+    let root = user_skill_root_for_user(paths, user_id);
+    let target = root.join(skill_name);
+    if PathBuf::from(&row.path) != target {
+        return Err(ExtensionError::InvalidRequest(
+            "CAPABILITY_LOCAL_RESOURCE_PATH_MISMATCH".to_string(),
+        ));
+    }
+    let pending = root.join(format!(".capability-uninstall-pending-{skill_name}"));
+    let backup = root.join(format!(".capability-backup-{skill_name}"));
+    replace_existing_path(&pending).await?;
+    let moved = match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            tokio::fs::rename(&target, &pending).await?;
+            true
+        }
+        Ok(_) => {
+            return Err(ExtensionError::SkillImportInvalidSource(target.display().to_string()));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = repo.delete_by_name_for_user(user_id, skill_name).await {
+        if moved {
+            let _ = tokio::fs::rename(&pending, &target).await;
+        }
+        return Err(error.into());
+    }
+    for stale_path in [&pending, &backup] {
+        if let Err(error) = replace_existing_path(stale_path).await {
+            warn!(path = %stale_path.display(), error = %error, "failed to clean uninstalled capability Skill path");
+        }
+    }
+    Ok(())
+}
+
 async fn create_capability_package_staging_dir(paths: &SkillPaths) -> Result<PathBuf, ExtensionError> {
     let staging_root = paths.user_skills_dir.join(".capability-platform-import");
     tokio::fs::create_dir_all(&staging_root).await?;

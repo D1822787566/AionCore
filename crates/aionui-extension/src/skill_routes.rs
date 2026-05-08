@@ -154,6 +154,7 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
             "/api/capabilities/{installation_id}/rollback",
             post(rollback_capability_installation),
         )
+        .route("/api/capabilities/{installation_id}", delete(uninstall_capability))
         .route(
             "/api/skills/capability-platform/catalog",
             post(list_capability_platform_catalog),
@@ -882,6 +883,67 @@ async fn rollback_capability_installation(
         "capability installation rolled back"
     );
     Ok(Json(ApiResponse::ok(response)))
+}
+
+/// Remove a managed local resource and its capability-factory installation record.
+async fn uninstall_capability(
+    State(state): State<SkillRouterState>,
+    Extension(current_user): Extension<CurrentUser>,
+    AxumPath(installation_id): AxumPath<String>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    let mut installations = load_capability_installations(&state, &current_user.id).await?;
+    let index = installations
+        .iter()
+        .position(|installation| installation.installation_id == installation_id)
+        .ok_or_else(|| ExtensionError::NotFound("CAPABILITY_INSTALLATION_NOT_FOUND".to_string()))?;
+    let installation = installations[index].clone();
+
+    match installation.kind.as_str() {
+        "skill" => {
+            skill_service::uninstall_capability_platform_skill_with_repo_for_user(
+                &state.skill_paths,
+                state.skill_repo.as_ref(),
+                &current_user.id,
+                &installation.local_resource_id,
+            )
+            .await?;
+        }
+        "mcp" => {
+            if state
+                .mcp_repo
+                .find_by_id(&current_user.id, &installation.local_resource_id)
+                .await
+                .map_err(ExtensionError::from)?
+                .is_some()
+            {
+                state
+                    .mcp_repo
+                    .delete(&current_user.id, &installation.local_resource_id)
+                    .await
+                    .map_err(ExtensionError::from)?;
+            }
+            let mut backups = load_preference::<HashMap<String, CapabilityMcpBackup>>(
+                &state,
+                &current_user.id,
+                CAPABILITY_FACTORY_MCP_BACKUPS_KEY,
+            )
+            .await?
+            .unwrap_or_default();
+            if backups.remove(&installation.installation_id).is_some() {
+                save_preference(&state, &current_user.id, CAPABILITY_FACTORY_MCP_BACKUPS_KEY, &backups).await?;
+            }
+        }
+        _ => return Err(ExtensionError::InvalidRequest("invalid capability kind".to_string()).into()),
+    }
+
+    installations.remove(index);
+    save_capability_installations(&state, &current_user.id, &installations).await?;
+    info!(
+        capability_kind = %installation.kind,
+        capability_id = %installation.capability_id,
+        "capability installation removed"
+    );
+    Ok(Json(ApiResponse::success()))
 }
 
 /// `POST /api/skills/capability-platform/catalog` — fetch the published
@@ -2111,7 +2173,6 @@ mod tests {
         )
         .await
         .unwrap();
-
         let Json(ApiResponse { data, .. }) = sync_capability_factory(State(state.clone()), Extension(user.clone()))
             .await
             .unwrap();
@@ -2250,6 +2311,118 @@ mod tests {
         .unwrap();
         assert_eq!(data.unwrap().state, "installed");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn capability_factory_uninstall_removes_skill_and_mcp_resources() {
+        let state = make_state().await;
+        let user = CurrentUser::local_default();
+        let files = vec![CapabilityPlatformSkillFile {
+            path: "SKILL.md".to_string(),
+            content_base64: base64::engine::general_purpose::STANDARD
+                .encode("---\nname: factory-review\ndescription: Review\n---\n# Review"),
+        }];
+        skill_service::import_capability_platform_skill_with_repo_for_user(
+            &state.skill_paths,
+            state.skill_repo.as_ref(),
+            &user.id,
+            &files,
+        )
+        .await
+        .unwrap();
+        let skill_root = state.skill_paths.user_skills_dir.join("users/system_default_user");
+        let skill_path = skill_root.join("factory-review");
+        let backup_path = skill_root.join(".capability-backup-factory-review");
+        std::fs::create_dir_all(&backup_path).unwrap();
+        let mcp = state
+            .mcp_repo
+            .create(CreateMcpServerParams {
+                user_id: &user.id,
+                name: "Factory MCP",
+                description: Some("Factory MCP"),
+                enabled: true,
+                transport_type: "http",
+                transport_config: r#"{"url":"http://mcp.test"}"#,
+                tools: None,
+                original_json: None,
+                builtin: false,
+            })
+            .await
+            .unwrap();
+        let installation = |installation_id: &str, kind: &str, capability_id: &str, local_resource_id: &str| {
+            CapabilityInstallationResponse {
+                installation_id: installation_id.to_string(),
+                kind: kind.to_string(),
+                capability_id: capability_id.to_string(),
+                local_resource_id: local_resource_id.to_string(),
+                installed_version: "1.0.0".to_string(),
+                artifact_sha256: None,
+                factory_url_snapshot: "http://factory.test".to_string(),
+                installed_at: 1,
+                updated_at: 1,
+                last_checked_at: None,
+                update_policy: "notify".to_string(),
+                ignored_version: None,
+                backup_path: None,
+                backup_version: None,
+                backup_artifact_sha256: None,
+                last_error_code: None,
+                last_error_message: None,
+                state: "installed".to_string(),
+            }
+        };
+        save_capability_installations(
+            &state,
+            &user.id,
+            &[
+                installation("skill:factory-review", "skill", "factory-review", "factory-review"),
+                installation("mcp:factory-mcp", "mcp", "factory-mcp", &mcp.id),
+                installation("skill:missing", "skill", "missing", "missing"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let _ = uninstall_capability(
+            State(state.clone()),
+            Extension(user.clone()),
+            AxumPath("skill:factory-review".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            state
+                .skill_repo
+                .find_by_name_for_user(&user.id, "factory-review")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!skill_path.exists());
+        assert!(!backup_path.exists());
+
+        let _ = uninstall_capability(
+            State(state.clone()),
+            Extension(user.clone()),
+            AxumPath("mcp:factory-mcp".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(state.mcp_repo.find_by_id(&user.id, &mcp.id).await.unwrap().is_none());
+
+        let _ = uninstall_capability(
+            State(state.clone()),
+            Extension(user.clone()),
+            AxumPath("skill:missing".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            load_capability_installations(&state, &user.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
