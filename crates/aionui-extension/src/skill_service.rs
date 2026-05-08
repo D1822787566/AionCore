@@ -965,7 +965,7 @@ pub async fn uninstall_capability_platform_skill_with_repo_for_user(
     };
     let root = user_skill_root_for_user(paths, user_id);
     let target = root.join(skill_name);
-    if *&row.path != target {
+    if row.path != target {
         return Err(ExtensionError::InvalidRequest(
             "CAPABILITY_LOCAL_RESOURCE_PATH_MISMATCH".to_string(),
         ));
