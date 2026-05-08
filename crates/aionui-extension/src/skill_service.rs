@@ -1,11 +1,15 @@
+use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use include_dir::{Dir, include_dir};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
+use aionui_api_types::CapabilityPlatformSkillFile;
 use aionui_db::{CreateSkillImportRecordParams, ISkillRepository, SkillRow, UpsertSkillParams};
 
 use crate::constants::{
@@ -30,6 +34,10 @@ const MAX_SKILL_IMPORT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_SKILL_IMPORT_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
 const IMPORT_STAGING_PREFIX: &str = ".import-staging-";
 const DEFAULT_USER_ID: &str = "system_default_user";
+const MAX_CAPABILITY_PACKAGE_FILES: usize = 500;
+const MAX_CAPABILITY_PACKAGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_CAPABILITY_PACKAGE_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+static CAPABILITY_PACKAGE_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillImportLimits {
@@ -789,6 +797,197 @@ pub async fn import_skills_with_repo_for_user(
     Err(ExtensionError::SkillImportInvalidSource(
         source_path.display().to_string(),
     ))
+}
+
+/// Import an in-memory Skill package downloaded from the public capability
+/// platform. Files are staged under the current user's data directory, then
+/// pass through the same copy, frontmatter and database import path as a local
+/// Skill folder.
+pub async fn import_capability_platform_skill_with_repo_for_user(
+    paths: &SkillPaths,
+    repo: &dyn ISkillRepository,
+    user_id: &str,
+    files: &[CapabilityPlatformSkillFile],
+) -> Result<SkillImportOutcome, ExtensionError> {
+    if files.is_empty() || files.len() > MAX_CAPABILITY_PACKAGE_FILES {
+        return Err(ExtensionError::SkillImportInvalidSource(
+            "capability platform package has an invalid file count".to_string(),
+        ));
+    }
+
+    let staging_dir = create_capability_package_staging_dir(paths).await?;
+    let result = async {
+        let mut seen_paths = HashSet::with_capacity(files.len());
+        let mut total_bytes = 0_u64;
+
+        for file in files {
+            let relative_path = capability_package_relative_path(&file.path)?;
+            if !seen_paths.insert(relative_path.clone()) {
+                return Err(ExtensionError::SkillImportInvalidSource(format!(
+                    "capability platform package contains a duplicate path: {}",
+                    file.path
+                )));
+            }
+
+            // Base64 is at most 4/3 the decoded length. Check before decoding
+            // so a malicious package cannot allocate beyond the platform limit.
+            if file.content_base64.len() > (MAX_CAPABILITY_PACKAGE_FILE_BYTES as usize).div_ceil(3) * 4 {
+                return Err(ExtensionError::SkillImportFileTooLarge {
+                    file_path: Some(file.path.clone()),
+                    file_bytes: file.content_base64.len() as u64,
+                    limit_bytes: MAX_CAPABILITY_PACKAGE_FILE_BYTES,
+                });
+            }
+            let bytes = BASE64_STANDARD.decode(&file.content_base64).map_err(|_| {
+                ExtensionError::SkillImportInvalidSource(format!(
+                    "capability platform package has invalid base64 content: {}",
+                    file.path
+                ))
+            })?;
+            let file_bytes = bytes.len() as u64;
+            if file_bytes > MAX_CAPABILITY_PACKAGE_FILE_BYTES {
+                return Err(ExtensionError::SkillImportFileTooLarge {
+                    file_path: Some(file.path.clone()),
+                    file_bytes,
+                    limit_bytes: MAX_CAPABILITY_PACKAGE_FILE_BYTES,
+                });
+            }
+            total_bytes = total_bytes.saturating_add(file_bytes);
+            if total_bytes > MAX_CAPABILITY_PACKAGE_TOTAL_BYTES {
+                return Err(ExtensionError::SkillImportTotalTooLarge {
+                    total_bytes,
+                    limit_bytes: MAX_CAPABILITY_PACKAGE_TOTAL_BYTES,
+                });
+            }
+
+            let target = staging_dir.join(&relative_path);
+            if let Some(parent) = target.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(target, bytes).await?;
+        }
+
+        import_skills_with_repo_for_user(paths, repo, user_id, &staging_dir).await
+    }
+    .await;
+
+    if let Err(error) = tokio::fs::remove_dir_all(&staging_dir).await {
+        warn!(staging = %staging_dir.display(), error = %error, "failed to clean capability package staging directory");
+    }
+    result
+}
+
+/// Replace a managed Skill while retaining one rollback snapshot. Package
+/// validation and the normal database upsert still run through the importer.
+pub async fn replace_capability_platform_skill_with_repo_for_user(
+    paths: &SkillPaths,
+    repo: &dyn ISkillRepository,
+    user_id: &str,
+    skill_name: &str,
+    files: &[CapabilityPlatformSkillFile],
+) -> Result<PathBuf, ExtensionError> {
+    let root = user_skill_root_for_user(paths, user_id);
+    let target = root.join(skill_name);
+    let backup = root.join(format!(".capability-backup-{skill_name}"));
+    let pending = root.join(format!(".capability-backup-pending-{skill_name}"));
+    let metadata = tokio::fs::symlink_metadata(&target).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ExtensionError::SkillImportInvalidSource(target.display().to_string()));
+    }
+    replace_existing_path(&pending).await?;
+    tokio::fs::rename(&target, &pending).await?;
+    let imported = import_capability_platform_skill_with_repo_for_user(paths, repo, user_id, files).await;
+    match imported {
+        Ok(outcome) if outcome.failed.is_empty() && outcome.imported.len() == 1 => {}
+        Ok(_) => {
+            let _ = replace_existing_path(&target).await;
+            let _ = tokio::fs::rename(&pending, &target).await;
+            return Err(ExtensionError::InvalidRequest("CAPABILITY_INSTALL_FAILED".to_string()));
+        }
+        Err(error) => {
+            let _ = replace_existing_path(&target).await;
+            let _ = tokio::fs::rename(&pending, &target).await;
+            return Err(error);
+        }
+    }
+    if let Err(error) = replace_existing_path(&backup).await {
+        let _ = replace_existing_path(&target).await;
+        let _ = tokio::fs::rename(&pending, &target).await;
+        return Err(error);
+    }
+    if let Err(error) = tokio::fs::rename(&pending, &backup).await {
+        let _ = replace_existing_path(&target).await;
+        let _ = tokio::fs::rename(&pending, &target).await;
+        return Err(error.into());
+    }
+    Ok(backup)
+}
+
+/// Atomically swap a managed Skill with its retained rollback snapshot.
+pub async fn rollback_capability_platform_skill_for_user(
+    paths: &SkillPaths,
+    user_id: &str,
+    skill_name: &str,
+) -> Result<PathBuf, ExtensionError> {
+    let root = user_skill_root_for_user(paths, user_id);
+    let target = root.join(skill_name);
+    let backup = root.join(format!(".capability-backup-{skill_name}"));
+    let pending = root.join(format!(".capability-rollback-pending-{skill_name}"));
+    if !tokio::fs::try_exists(&backup).await? {
+        return Err(ExtensionError::NotFound(
+            "CAPABILITY_ROLLBACK_BACKUP_MISSING".to_string(),
+        ));
+    }
+    replace_existing_path(&pending).await?;
+    tokio::fs::rename(&target, &pending).await?;
+    if let Err(error) = tokio::fs::rename(&backup, &target).await {
+        let _ = tokio::fs::rename(&pending, &target).await;
+        return Err(error.into());
+    }
+    if let Err(error) = tokio::fs::rename(&pending, &backup).await {
+        let _ = tokio::fs::rename(&target, &backup).await;
+        let _ = tokio::fs::rename(&pending, &target).await;
+        return Err(error.into());
+    }
+    Ok(backup)
+}
+
+async fn create_capability_package_staging_dir(paths: &SkillPaths) -> Result<PathBuf, ExtensionError> {
+    let staging_root = paths.user_skills_dir.join(".capability-platform-import");
+    tokio::fs::create_dir_all(&staging_root).await?;
+    for _ in 0..100 {
+        let sequence = CAPABILITY_PACKAGE_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = staging_root.join(format!("{}-{sequence}", std::process::id()));
+        match tokio::fs::create_dir(&candidate).await {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ExtensionError::Internal(
+        "could not allocate capability package staging directory".to_string(),
+    ))
+}
+
+fn capability_package_relative_path(value: &str) -> Result<PathBuf, ExtensionError> {
+    if value.is_empty()
+        || value.contains('\\')
+        || value.starts_with('/')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(ExtensionError::PathTraversal(value.to_string()));
+    }
+
+    let mut relative_path = PathBuf::new();
+    for component in Path::new(value).components() {
+        match component {
+            Component::Normal(part) => relative_path.push(part),
+            _ => return Err(ExtensionError::PathTraversal(value.to_string())),
+        }
+    }
+    Ok(relative_path)
 }
 
 async fn import_skills_from_zip(paths: &SkillPaths, archive_path: &Path) -> Result<SkillImportOutcome, ExtensionError> {
@@ -2771,6 +2970,54 @@ mod tests {
         let names: Vec<_> = skills.into_iter().map(|skill| skill.name).collect();
         assert_eq!(names[0], "newer-skill");
         assert_eq!(names[1], "older-skill");
+    }
+
+    #[tokio::test]
+    async fn import_capability_platform_skill_imports_full_package_and_rejects_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_test_paths(tmp.path());
+        let repo = make_test_skill_repo().await;
+        let user_id = DEFAULT_USER_ID;
+        let files = vec![
+            CapabilityPlatformSkillFile {
+                path: "SKILL.md".to_string(),
+                content_base64: BASE64_STANDARD
+                    .encode("---\nname: factory-review\ndescription: Review code from the factory\n---\n# Review"),
+            },
+            CapabilityPlatformSkillFile {
+                path: "references/checklist.md".to_string(),
+                content_base64: BASE64_STANDARD.encode("# Checklist"),
+            },
+        ];
+
+        let outcome = import_capability_platform_skill_with_repo_for_user(&paths, &repo, user_id, &files)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.imported, ["factory-review"]);
+        let installed = user_skill_root_for_user(&paths, user_id).join("factory-review");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("references/checklist.md")).unwrap(),
+            "# Checklist"
+        );
+        assert!(
+            repo.find_by_name_for_user(user_id, "factory-review")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let traversal = import_capability_platform_skill_with_repo_for_user(
+            &paths,
+            &repo,
+            user_id,
+            &[CapabilityPlatformSkillFile {
+                path: "../outside.txt".to_string(),
+                content_base64: BASE64_STANDARD.encode("blocked"),
+            }],
+        )
+        .await;
+        assert!(matches!(traversal, Err(ExtensionError::PathTraversal(_))));
     }
 
     #[tokio::test]

@@ -382,6 +382,50 @@ pub struct MessageListResponse {
     pub has_more_after: bool,
 }
 
+/// Original tool execution data captured immediately before a backend
+/// compaction removes it from the live agent context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionAuditToolExecutionResponse {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub output: String,
+    pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
+/// The compaction operation that generated a durable audit record.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationCompactionAuditKind {
+    Microcompact,
+    Autocompact,
+}
+
+/// One durable snapshot made before AionRS removes context from a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationCompactionAuditResponse {
+    pub kind: ConversationCompactionAuditKind,
+    pub created_at: String,
+    pub tool_results: Vec<CompactionAuditToolExecutionResponse>,
+    pub affected_tool_results: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_freed: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarized_messages: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_compact_tokens: Option<u64>,
+}
+
+/// Response for `GET /api/conversations/:id/compaction-audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationCompactionAuditListResponse {
+    pub items: Vec<ConversationCompactionAuditResponse>,
+}
+
 /// Response for `GET /api/conversations/active-count`.
 #[derive(Debug, Serialize)]
 pub struct ActiveCountResponse {

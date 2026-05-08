@@ -77,6 +77,12 @@ async fn fixture_embedded() -> Fixture {
     states.skill = SkillRouterState {
         skill_paths,
         skill_repo: skill_repo.clone(),
+        mcp_repo: Arc::new(aionui_db::SqliteMcpServerRepository::new(
+            services.database.pool().clone(),
+        )),
+        client_preference_repo: Arc::new(aionui_db::SqliteClientPreferenceRepository::new(
+            services.database.pool().clone(),
+        )),
         external_paths_manager: ext_paths_mgr,
         assistant_dispatcher: states.skill.assistant_dispatcher.clone(),
     };

@@ -224,3 +224,13 @@ debug = "line-tables-only"
 split-debuginfo = "unpacked"
 incremental = false
 
+# Bundle AionUi with the checked-out AionRS sources so its local audit changes
+# are present in the aioncore binary produced by the desktop build.
+[patch."https://github.com/iOfficeAI/aionrs.git"]
+aion-agent = { path = "../aionrs/crates/aion-agent" }
+aion-providers = { path = "../aionrs/crates/aion-providers" }
+aion-types = { path = "../aionrs/crates/aion-types" }
+aion-protocol = { path = "../aionrs/crates/aion-protocol" }
+aion-config = { path = "../aionrs/crates/aion-config" }
+aion-mcp = { path = "../aionrs/crates/aion-mcp" }
+

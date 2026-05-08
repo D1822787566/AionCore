@@ -31,7 +31,7 @@ use aionui_conversation::{
     ConversationRuntimeRouterState, conversation_ops_routes, conversation_routes, conversation_runtime_routes,
 };
 use aionui_cron::cron_routes;
-use aionui_extension::{extension_routes, hub_routes, skill_routes};
+use aionui_extension::{extension_routes, hub_routes, skill_routes, spawn_capability_factory_sync};
 use aionui_file::file_routes;
 use aionui_mcp::mcp_routes;
 use aionui_office::{office_proxy_routes, office_routes};
@@ -120,6 +120,7 @@ pub async fn create_router_with_runtime(services: &AppServices) -> Result<(Route
     let (states, channel_components) = build_module_states(services).await?;
     let client_pref_service = states.system.client_pref_service.clone();
     let team_service = states.team.service.clone();
+    spawn_capability_factory_sync(states.skill.clone(), services.user_repo.clone());
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: module states built");
 
     // Start channel orchestrator (message loop)

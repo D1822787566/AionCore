@@ -1134,6 +1134,10 @@ pub async fn build_extension_states(
     let skill_state = SkillRouterState {
         skill_paths: services.skill_paths.as_ref().clone(),
         skill_repo: services.skill_repo.clone(),
+        mcp_repo: Arc::new(aionui_db::SqliteMcpServerRepository::new(
+            services.database.pool().clone(),
+        )),
+        client_preference_repo: Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
         external_paths_manager: ext_paths_mgr,
         assistant_dispatcher: None,
     };

@@ -117,7 +117,6 @@ dependencies = [
 [[package]]
 name = "aion-agent"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-compact",
  "aion-config",
@@ -148,7 +147,6 @@ dependencies = [
 [[package]]
 name = "aion-compact"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "regex",
  "serde",
@@ -160,7 +158,6 @@ dependencies = [
 [[package]]
 name = "aion-config"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-compact",
  "aion-process",
@@ -185,7 +182,6 @@ dependencies = [
 [[package]]
 name = "aion-mcp"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-config",
  "aion-protocol",
@@ -206,7 +202,6 @@ dependencies = [
 [[package]]
 name = "aion-memory"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-config",
  "chrono",
@@ -220,7 +215,6 @@ dependencies = [
 [[package]]
 name = "aion-process"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "libc",
  "tokio",
@@ -231,7 +225,6 @@ dependencies = [
 [[package]]
 name = "aion-protocol"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-types",
  "serde",
@@ -244,7 +237,6 @@ dependencies = [
 [[package]]
 name = "aion-providers"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-config",
  "aion-types",
@@ -273,7 +265,6 @@ dependencies = [
 [[package]]
 name = "aion-skills"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-config",
  "aion-mcp",
@@ -300,7 +291,6 @@ dependencies = [
 [[package]]
 name = "aion-tools"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-config",
  "aion-process",
@@ -322,7 +312,6 @@ dependencies = [
 [[package]]
 name = "aion-types"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "async-trait",
  "base64",
@@ -662,6 +651,7 @@ dependencies = [
  "aionui-runtime",
  "async-trait",
  "axum",
+ "base64",
  "dirs",
  "fs2",
  "hex",
@@ -670,6 +660,7 @@ dependencies = [
  "junction",
  "mime_guess",
  "notify",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
@@ -2222,6 +2213,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more",
  "document-features",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix",
@@ -3119,6 +3111,17 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.1.5",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -7117,17 +7120,17 @@ dependencies = [
 [[package]]
 name = "workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "bitflags",
  "cc",
+ "either",
  "futures-channel",
  "futures-core",
  "futures-sink",
  "futures-task",
  "futures-util",
  "getrandom 0.2.17",
- "getrandom 0.3.4",
+ "hashbrown 0.16.1",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -7148,6 +7151,7 @@ dependencies = [
  "smallvec",
  "subtle",
  "syn 2.0.117",
+ "syn 3.0.3",
  "time",
  "tokio",
  "tokio-rustls",
@@ -7157,7 +7161,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "uuid",
- "windows-sys 0.60.2",
  "windows-sys 0.61.2",
  "winnow 1.0.2",
  "zeroize",

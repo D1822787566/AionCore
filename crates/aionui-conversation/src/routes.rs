@@ -9,10 +9,11 @@ use axum::routing::{get, patch, post};
 use aionui_api_types::{
     ActiveCountResponse, ApiResponse, ApprovalCheckQuery, ApprovalCheckResponse, CancelConversationRequest,
     CancelConversationResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
-    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse, ConversationResponse,
-    CreateConversationRequest, EnsureConversationRuntimeResponse, ForkConversationRequest, ListConversationsQuery,
-    ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationCompactionAuditListResponse,
+    ConversationListResponse, ConversationResponse, CreateConversationRequest, EnsureConversationRuntimeResponse,
+    ForkConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse,
+    MessageSearchResponse, SearchMessagesQuery, SendMessageRequest, SendMessageResponse,
+    UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::ApiError;
@@ -121,6 +122,7 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/reset", post(reset))
         .route("/api/conversations/{id}/fork", post(fork))
         .route("/api/conversations/{id}/associated", get(associated))
+        .route("/api/conversations/{id}/compaction-audit", get(list_compaction_audit))
         .route("/api/conversations/{id}/messages", get(list_msg).post(send_msg))
         // MUST precede the `{messageId}` wildcard below: registered after it,
         // "latest" would be captured as a message id and 404.
@@ -257,6 +259,19 @@ async fn list_msg(
     let result = state
         .service
         .list_messages(&user.id, &id, query)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn list_compaction_audit(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ConversationCompactionAuditListResponse>>, ApiError> {
+    let result = state
+        .service
+        .list_compaction_audit(&user.id, &id)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(result)))

@@ -94,14 +94,16 @@ pub use confirmation::{ApprovalCheckQuery, ApprovalCheckResponse, ConfirmRequest
 pub use connection_test::TestBedrockConnectionRequest;
 pub use conversation::{
     ActiveCountResponse, AssistantConversationOverridesRequest, AssistantConversationRequest,
-    CancelConversationRequest, CancelConversationResponse, CloneConversationRequest, ConversationArtifactKind,
-    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationArtifactStatus,
-    ConversationAssistantIdentityResponse, ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
-    ConversationNameUpdatedPayload, ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
-    CreateConversationRequest, EnsureConversationRuntimeResponse, ForkCapabilityView, ForkConversationRequest,
-    ListConversationsQuery, ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse, MessageResponse,
-    MessageSearchItem, MessageSearchResponse, MessageStatusChangedPayload, PromptCapabilityView, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, SessionRef, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    CancelConversationRequest, CancelConversationResponse, CloneConversationRequest,
+    CompactionAuditToolExecutionResponse, ConversationArtifactKind, ConversationArtifactListResponse,
+    ConversationArtifactResponse, ConversationArtifactStatus, ConversationAssistantIdentityResponse,
+    ConversationCompactionAuditKind, ConversationCompactionAuditListResponse, ConversationCompactionAuditResponse,
+    ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind, ConversationNameUpdatedPayload,
+    ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary, CreateConversationRequest,
+    EnsureConversationRuntimeResponse, ForkCapabilityView, ForkConversationRequest, ListConversationsQuery,
+    ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse, MessageResponse, MessageSearchItem,
+    MessageSearchResponse, MessageStatusChangedPayload, PromptCapabilityView, SearchMessagesQuery, SendMessageRequest,
+    SendMessageResponse, SessionRef, UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
 pub use conversation_tools::{
     CONVERSATION_TOOLS_SCHEMA_VERSION, ConversationCliEnvelope, ConversationCliMeta, ConversationCreateAssistant,
@@ -181,12 +183,17 @@ pub use sidebar::{
     SidebarTeamItem,
 };
 pub use skill::{
-    AddExternalPathRequest, DeleteSkillRequest, ExportSkillRequest, ExternalSkillSourceResponse,
-    ImportSkillFailureResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
-    MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadAssistantRuleRequest,
-    ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
+    AddExternalPathRequest, CapabilityCatalogSnapshotResponse, CapabilityFactoryStatusResponse,
+    CapabilityInstallationResponse, CapabilityPlatformCatalogItem, CapabilityPlatformCatalogRequest,
+    CapabilityPlatformCatalogResponse, CapabilityPlatformCompatibility, CapabilityPlatformHealthResponse,
+    CapabilityPlatformMcpConfig, CapabilityPlatformSkillFile, CapabilityPlatformSkillFilePreview, DeleteSkillRequest,
+    ExportSkillRequest, ExternalSkillSourceResponse, ImportCapabilityPlatformSkillRequest, ImportSkillFailureResponse,
+    ImportSkillRequest, ImportSkillResponse, InstallCapabilityRequest, ListCapabilityPlatformSkillFilesRequest,
+    MaterializeSkillsRequest, MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse,
+    ReadAssistantRuleRequest, ReadBuiltinResourceRequest, ReadCapabilityPlatformSkillFileRequest,
+    ReadCapabilityPlatformSkillRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse, SkillImportLimitsResponse,
-    SkillImportRecordResponse, SkillListItemResponse, SkillPathsResponse, SkillSourceResponse,
+    SkillImportRecordResponse, SkillListItemResponse, SkillPathsResponse, SkillSourceResponse, UpdateCapabilityRequest,
     WriteAssistantRuleRequest,
 };
 pub use skill_delivery::{SkillDelivery, SkillDeliveryMode, SkillDeliveryParse, parse_skill_delivery};

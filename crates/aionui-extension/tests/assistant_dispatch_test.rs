@@ -171,6 +171,8 @@ async fn router_with_dispatcher(dispatcher: Arc<FakeDispatcher>) -> axum::Router
     let state = SkillRouterState {
         skill_paths: paths,
         skill_repo,
+        mcp_repo: Arc::new(aionui_db::SqliteMcpServerRepository::new(db.pool().clone())),
+        client_preference_repo: Arc::new(aionui_db::SqliteClientPreferenceRepository::new(db.pool().clone())),
         external_paths_manager: ext_mgr,
         assistant_dispatcher: Some(dispatcher),
     };

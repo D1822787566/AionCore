@@ -121,6 +121,7 @@ impl AppServices {
         self.worker_task_manager = wtm;
         self.conversation_service = build_conversation_service(ConversationServiceDeps {
             database: &self.database,
+            data_dir: self.data_dir.clone(),
             work_dir: self.work_dir.clone(),
             event_bus: self.event_bus.clone(),
             skill_paths: self.skill_paths.clone(),
@@ -391,6 +392,7 @@ impl AppServices {
         let conversation_runtime_state = Arc::new(ConversationRuntimeStateService::default());
         let conversation_service = build_conversation_service(ConversationServiceDeps {
             database: &database,
+            data_dir: data_dir.clone(),
             work_dir: work_dir.clone(),
             event_bus: event_bus.clone(),
             skill_paths: skill_paths.clone(),
@@ -466,6 +468,7 @@ impl AppServices {
 
 struct ConversationServiceDeps<'a> {
     database: &'a Database,
+    data_dir: PathBuf,
     work_dir: PathBuf,
     event_bus: Arc<BroadcastEventBus>,
     skill_paths: Arc<aionui_extension::SkillPaths>,
@@ -498,6 +501,7 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
         Arc::new(SqliteAgentMetadataRepository::new(deps.database.pool().clone())),
         Arc::new(SqliteAcpSessionRepository::new(deps.database.pool().clone())),
     )
+    .with_aionrs_session_directory(deps.data_dir.join("aionrs-sessions"))
     .with_runtime_state(deps.conversation_runtime_state)
     .with_runtime_helper_context(deps.runtime_helper_bin, deps.runtime_base_url)
     .with_runtime_token_service(deps.runtime_token_service);

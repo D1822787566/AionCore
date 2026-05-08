@@ -1030,10 +1030,9 @@ async fn annotate_local_installation_states(
         if matches!(
             installation.state.as_str(),
             "installed" | "update_available" | "local_newer"
-        ) {
-            if let Some(local_state) = local_installation_state(state, user_id, &installation).await? {
-                installation.state = local_state;
-            }
+        ) && let Some(local_state) = local_installation_state(state, user_id, &installation).await?
+        {
+            installation.state = local_state;
         }
         annotated.push(installation);
     }

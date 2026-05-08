@@ -271,6 +271,12 @@ async fn fixture() -> Fixture {
     states.skill = SkillRouterState {
         skill_paths,
         skill_repo: std::sync::Arc::new(aionui_db::SqliteSkillRepository::new(services.database.pool().clone())),
+        mcp_repo: std::sync::Arc::new(aionui_db::SqliteMcpServerRepository::new(
+            services.database.pool().clone(),
+        )),
+        client_preference_repo: std::sync::Arc::new(aionui_db::SqliteClientPreferenceRepository::new(
+            services.database.pool().clone(),
+        )),
         external_paths_manager: ext_paths_mgr,
         assistant_dispatcher: None, // wired below once service is constructed
     };

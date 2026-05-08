@@ -16,16 +16,18 @@ use crate::runtime_persistence::{RuntimePersistenceCoordinator, RuntimeWriteKind
 use crate::runtime_state::ConversationRuntimeStateService;
 use aionui_api_types::{
     ASSISTANT_MCP_BINDING_CHANGED_EVENT, ApprovalCheckResponse, AssistantConversationOverridesRequest,
-    AssistantMcpBindingChanged, CancelConversationResponse, CloneConversationRequest, ConfirmRequest,
-    ConfirmationListResponse, ConversationArtifactKind, ConversationArtifactListResponse, ConversationArtifactResponse,
-    ConversationArtifactStatus, ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
-    ConversationNameUpdatedPayload, ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest,
-    EnsureConversationRuntimeResponse, ForkCapabilityView, ForkConversationRequest, ListConversationsQuery,
-    ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse, MessageResponse, MessageSearchResponse,
-    PromptCapabilityView, SearchMessagesQuery, SendMessageRequest, SendMessageResponse, SessionMcpServer,
-    SessionMcpTransport, TEAM_MCP_SERVER_NAME, TeamMcpSelection, TeamSessionBinding, UpdateConversationArtifactRequest,
-    UpdateConversationRequest, WebSocketMessage, assistant_avatar_response_value,
-    assistant_avatar_response_value_with_version, assistant_mcp_binding_fingerprint,
+    AssistantMcpBindingChanged, CancelConversationResponse, CloneConversationRequest,
+    CompactionAuditToolExecutionResponse, ConfirmRequest, ConfirmationListResponse, ConversationArtifactKind,
+    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationArtifactStatus,
+    ConversationCompactionAuditKind, ConversationCompactionAuditListResponse, ConversationCompactionAuditResponse,
+    ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind, ConversationNameUpdatedPayload,
+    ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest, EnsureConversationRuntimeResponse,
+    ForkCapabilityView, ForkConversationRequest, ListConversationsQuery, ListMessagesQuery, McpRuntimeSnapshot,
+    MessageListResponse, MessageResponse, MessageSearchResponse, PromptCapabilityView, SearchMessagesQuery,
+    SendMessageRequest, SendMessageResponse, SessionMcpServer, SessionMcpTransport, TEAM_MCP_SERVER_NAME,
+    TeamMcpSelection, TeamSessionBinding, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    WebSocketMessage, assistant_avatar_response_value, assistant_avatar_response_value_with_version,
+    assistant_mcp_binding_fingerprint,
 };
 use aionui_api_types::{ChatFileRef, SessionRef};
 use aionui_common::{
@@ -70,6 +72,84 @@ const ACP_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 const LEGACY_CONVERSATION_ARCHIVED_MESSAGE: &str =
     "This historical conversation can no longer be continued. Please start a new conversation.";
 const DEPRECATED_AGENT_TYPE_MESSAGE: &str = "This agent type is no longer supported for new conversations.";
+
+#[derive(serde::Deserialize)]
+struct PersistedAionrsAuditSession {
+    #[serde(default)]
+    compaction_audit: Vec<PersistedCompactionAudit>,
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedCompactionAudit {
+    kind: ConversationCompactionAuditKind,
+    created_at: String,
+    #[serde(default)]
+    tool_results: Vec<PersistedCompactionAuditToolExecution>,
+    affected_tool_results: usize,
+    #[serde(default)]
+    estimated_tokens_freed: Option<usize>,
+    #[serde(default)]
+    summarized_messages: Option<usize>,
+    #[serde(default)]
+    pre_compact_tokens: Option<u64>,
+}
+
+impl PersistedCompactionAudit {
+    fn into_response(self) -> ConversationCompactionAuditResponse {
+        ConversationCompactionAuditResponse {
+            kind: self.kind,
+            created_at: self.created_at,
+            tool_results: self
+                .tool_results
+                .into_iter()
+                .map(PersistedCompactionAuditToolExecution::into_response)
+                .collect(),
+            affected_tool_results: self.affected_tool_results,
+            estimated_tokens_freed: self.estimated_tokens_freed,
+            summarized_messages: self.summarized_messages,
+            pre_compact_tokens: self.pre_compact_tokens,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedCompactionAuditToolExecution {
+    tool_use_id: String,
+    tool_name: String,
+    input: serde_json::Value,
+    output: String,
+    is_error: bool,
+    #[serde(default)]
+    message_timestamp: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
+}
+
+impl PersistedCompactionAuditToolExecution {
+    fn into_response(self) -> CompactionAuditToolExecutionResponse {
+        CompactionAuditToolExecutionResponse {
+            tool_use_id: self.tool_use_id,
+            tool_name: self.tool_name,
+            input: self.input,
+            output: self.output,
+            is_error: self.is_error,
+            message_timestamp: self.message_timestamp,
+            turn_id: self.turn_id,
+        }
+    }
+}
+
+fn encode_aionrs_session_id(session_id: &str) -> String {
+    let mut encoded = String::with_capacity(session_id.len());
+    for byte in session_id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub(crate) struct AssistantConversationOverrides {
@@ -341,6 +421,9 @@ pub struct ConversationService {
     runtime_helper_bin: Option<String>,
     runtime_base_url: Option<String>,
     runtime_token_service: Option<Arc<RuntimeTokenService>>,
+    /// Directory containing AionRS session files. It is optional so service
+    /// instances for other agent types keep their existing behavior.
+    aionrs_session_directory: Option<PathBuf>,
 
     /// One background-stream watcher per LIVE Session instance (keyed by
     /// conversation id; value remembers the instance pointer so a rebuilt
@@ -425,6 +508,7 @@ impl ConversationService {
             runtime_helper_bin: None,
             runtime_base_url: None,
             runtime_token_service: None,
+            aionrs_session_directory: None,
             background_watchers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
 
             conversation_repo,
@@ -446,6 +530,11 @@ impl ConversationService {
 
     pub fn with_runtime_token_service(mut self, runtime_token_service: Arc<RuntimeTokenService>) -> Self {
         self.runtime_token_service = Some(runtime_token_service);
+        self
+    }
+
+    pub fn with_aionrs_session_directory(mut self, directory: PathBuf) -> Self {
+        self.aionrs_session_directory = Some(directory);
         self
     }
 
@@ -3232,6 +3321,50 @@ impl ConversationService {
             newest_cursor,
             has_more_before: page.has_more_before,
             has_more_after: page.has_more_after,
+        })
+    }
+
+    /// Return durable snapshots of tool calls that AionRS removed during
+    /// compaction. Ownership is verified before the session file is read.
+    pub async fn list_compaction_audit(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<ConversationCompactionAuditListResponse, ConversationError> {
+        self.conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+
+        let Some(directory) = self.aionrs_session_directory.as_ref() else {
+            return Ok(ConversationCompactionAuditListResponse { items: Vec::new() });
+        };
+        let state_path = directory
+            .join("sessions")
+            .join(encode_aionrs_session_id(conversation_id))
+            .join("state.json");
+        let source = match std::fs::read_to_string(&state_path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ConversationCompactionAuditListResponse { items: Vec::new() });
+            }
+            Err(error) => {
+                return Err(ConversationError::internal(format!(
+                    "Failed to read conversation compaction audit: {error}"
+                )));
+            }
+        };
+        let session: PersistedAionrsAuditSession = serde_json::from_str(&source)
+            .map_err(|error| ConversationError::internal(format!("Invalid conversation compaction audit: {error}")))?;
+
+        Ok(ConversationCompactionAuditListResponse {
+            items: session
+                .compaction_audit
+                .into_iter()
+                .map(PersistedCompactionAudit::into_response)
+                .collect(),
         })
     }
 
@@ -6037,6 +6170,42 @@ pub(crate) async fn apply_agent_title(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn persisted_compaction_audit_maps_original_tool_execution() {
+        let session: PersistedAionrsAuditSession = serde_json::from_value(json!({
+            "compaction_audit": [{
+                "kind": "microcompact",
+                "created_at": "2026-05-03T12:00:00Z",
+                "tool_results": [{
+                    "tool_use_id": "tool-1",
+                    "tool_name": "Read",
+                    "input": {"path": "notes.md"},
+                    "output": "original output",
+                    "is_error": false,
+                    "turn_id": "turn-1"
+                }],
+                "affected_tool_results": 1,
+                "estimated_tokens_freed": 12,
+                "summarized_messages": null,
+                "pre_compact_tokens": null
+            }]
+        }))
+        .unwrap();
+
+        let audit = session.compaction_audit.into_iter().next().unwrap().into_response();
+
+        assert_eq!(audit.kind, ConversationCompactionAuditKind::Microcompact);
+        assert_eq!(audit.tool_results[0].tool_name, "Read");
+        assert_eq!(audit.tool_results[0].input, json!({"path": "notes.md"}));
+        assert_eq!(audit.tool_results[0].output, "original output");
+        assert_eq!(audit.tool_results[0].turn_id.as_deref(), Some("turn-1"));
+    }
+
+    #[test]
+    fn aionrs_session_id_encoding_matches_persisted_layout() {
+        assert_eq!(encode_aionrs_session_id("conversation/a b"), "conversation%2Fa%20b");
+    }
 
     #[test]
     fn enum_to_db_agent_type() {

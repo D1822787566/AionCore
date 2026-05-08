@@ -51,7 +51,7 @@ pub use external_paths::ExternalPathsManager;
 pub use hub::{HubIndexManager, HubInstaller};
 pub use hub_routes::{HubRouterState, hub_routes};
 pub use routes::{ExtensionRouterState, extension_routes};
-pub use skill_routes::{SkillRouterState, skill_routes};
+pub use skill_routes::{SkillRouterState, skill_routes, spawn_capability_factory_sync};
 pub use skill_service::{
     BUILTIN_SKILLS_ENV_VAR, ExternalSkillSource, NamedPath, ResolvedAgentSkill, ScannedSkill, SkillListItem,
     SkillPaths, SkillSource, builtin_skills_corpus, builtin_skills_materialize_marker, delete_skill,
