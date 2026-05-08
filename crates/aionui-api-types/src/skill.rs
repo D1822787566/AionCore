@@ -64,6 +64,216 @@ pub struct ImportSkillRequest {
     pub skill_path: String,
 }
 
+/// A public capability platform endpoint selected by the current user.
+///
+/// The first version intentionally keeps the endpoint client-configured: the
+/// platform is deployed inside the customer's network and AionCore owns the
+/// network request, so the WebUI does not need cross-origin access.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CapabilityPlatformCatalogRequest {
+    pub platform_url: String,
+}
+
+/// Request to retrieve one published Skill package from the configured public
+/// capability platform and import it into the current user's Skill directory.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportCapabilityPlatformSkillRequest {
+    pub platform_url: String,
+    pub skill_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadCapabilityPlatformSkillRequest {
+    pub platform_url: String,
+    pub skill_id: String,
+    pub version: String,
+}
+
+/// Request a published Skill's browseable file metadata from the capability
+/// platform. Package installation remains a separate, full-package operation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListCapabilityPlatformSkillFilesRequest {
+    pub platform_url: String,
+    pub skill_id: String,
+    pub version: String,
+}
+
+/// Request one published Skill file's safe preview through AionCore.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadCapabilityPlatformSkillFileRequest {
+    pub platform_url: String,
+    pub skill_id: String,
+    pub version: String,
+    pub path: String,
+}
+
+/// A file in a published Skill package. The platform transports files as
+/// base64-encoded JSON so a complete Skill directory can be preserved without
+/// executing anything during the import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityPlatformSkillFile {
+    pub path: String,
+    pub content_base64: String,
+}
+
+/// Metadata for a Skill file that can be displayed without downloading the
+/// package. `content` is present only when the platform's preview policy allows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityPlatformSkillFilePreview {
+    pub path: String,
+    pub bytes: usize,
+    pub sha256: String,
+    pub media_type: String,
+    pub preview_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+/// Streamable HTTP configuration published for an MCP entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityPlatformMcpConfig {
+    pub transport: String,
+    pub url: String,
+}
+
+/// One published entry returned by the public capability platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityPlatformCatalogItem {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Monotonic platform revision used for catalog ordering/audit display.
+    #[serde(default)]
+    pub revision: Option<u64>,
+    #[serde(default)]
+    pub artifact_sha256: Option<String>,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub release_notes: Option<String>,
+    #[serde(default)]
+    pub compatibility: Option<CapabilityPlatformCompatibility>,
+    #[serde(default)]
+    pub file_count: Option<usize>,
+    #[serde(default)]
+    pub total_bytes: Option<usize>,
+    #[serde(default)]
+    pub example_count: Option<usize>,
+    #[serde(default)]
+    pub config: Option<CapabilityPlatformMcpConfig>,
+}
+
+/// Published capabilities fetched from the configured platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityPlatformCatalogResponse {
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    #[serde(default)]
+    pub catalog_version: Option<String>,
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    pub items: Vec<CapabilityPlatformCatalogItem>,
+}
+
+/// Client-version range published with a capability release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityPlatformCompatibility {
+    pub aionui: String,
+}
+
+/// Health information returned by the capability platform before a client
+/// saves an internal endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityPlatformHealthResponse {
+    pub status: String,
+    pub version: String,
+    pub capability_count: usize,
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    #[serde(default)]
+    pub catalog_version: Option<String>,
+    #[serde(default)]
+    pub storage: Option<String>,
+}
+
+/// Persisted state for the single project capability factory.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityFactoryStatusResponse {
+    pub url: Option<String>,
+    pub sync_enabled: bool,
+    pub sync_interval_minutes: u16,
+    pub last_attempted_at: Option<i64>,
+    pub last_successful_sync_at: Option<i64>,
+    pub catalog_version: Option<String>,
+    pub etag: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+}
+
+/// One local installation managed by the project capability factory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityInstallationResponse {
+    pub installation_id: String,
+    pub kind: String,
+    pub capability_id: String,
+    pub local_resource_id: String,
+    pub installed_version: String,
+    pub artifact_sha256: Option<String>,
+    pub factory_url_snapshot: String,
+    pub installed_at: i64,
+    pub updated_at: i64,
+    pub last_checked_at: Option<i64>,
+    pub update_policy: String,
+    pub ignored_version: Option<String>,
+    pub backup_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_artifact_sha256: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    pub state: String,
+}
+
+/// Cached catalog plus Core-computed installation state. The UI must use this
+/// response instead of inferring installations from Skill names or MCP URLs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityCatalogSnapshotResponse {
+    pub items: Vec<CapabilityPlatformCatalogItem>,
+    pub installations: Vec<CapabilityInstallationResponse>,
+    pub stale: bool,
+    pub last_successful_sync_at: Option<i64>,
+    pub catalog_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InstallCapabilityRequest {
+    pub kind: String,
+    pub capability_id: String,
+}
+
+/// Request body for a managed capability update. Local Skill changes require
+/// an explicit confirmation before the factory release can replace them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateCapabilityRequest {
+    #[serde(default)]
+    pub replace_locally_modified: bool,
+}
+
 /// Response for skill import operations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImportSkillResponse {
