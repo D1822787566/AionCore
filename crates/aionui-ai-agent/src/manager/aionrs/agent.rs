@@ -39,6 +39,9 @@ use crate::types::{AionrsResolvedConfig, SendMessageData};
 
 use super::content::build_content_blocks;
 use super::error::{aionrs_engine_error_to_send_error, aionrs_runtime_error_summary};
+use super::vision::{VisionRuntime, has_image_attachment};
+use aion_types::message::{ContentBlock, ImageInputCapability};
+use aionui_api_types::{AgentErrorCode, AgentErrorOwnership};
 
 fn resolve_aionui_config(cli_args: &CliArgs) -> Result<Config, AgentError> {
     let mut config =
@@ -106,6 +109,8 @@ fn build_aionrs_final_input_dump_value(
 pub struct AionrsAgentManager {
     runtime: AgentRuntime,
     engine: Mutex<AgentEngine>,
+    vision: Option<Mutex<VisionRuntime>>,
+    original_image_capability: ImageInputCapability,
     /// Static slash command metadata captured at bootstrap so UI lookups do
     /// not wait behind an active `engine.run()` turn.
     slash_commands: Vec<SlashCommandItem>,
@@ -220,6 +225,9 @@ impl AionrsAgentManager {
         let provider_label = config.provider_label.clone();
 
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink).runtime_env(runtime_env);
+        if let Some(source) = config_extra.host_skills {
+            bootstrap = bootstrap.host_skills(source);
+        }
         if let Some(session) = resume_session {
             info!(
                 conversation_id = %conversation_id,
@@ -230,12 +238,16 @@ impl AionrsAgentManager {
             bootstrap = bootstrap.resume(session);
         }
 
+        let vision_servers = config_extra.extra_mcp_servers.clone();
+        let vision_config = config_extra.vision;
         let result = bootstrap
             .build()
             .await
             .map_err(|e| AgentError::internal(format!("Agent bootstrap failed: {e}")))?;
 
         let mut engine = result.engine;
+        let vision =
+            vision_config.map(|config| Mutex::new(VisionRuntime::new(config, &result.mcp_managers, &vision_servers)));
         if !is_resume && let Err(e) = engine.init_session(&provider_label, &workspace, Some(&conversation_id)) {
             error!(
                 conversation_id = %conversation_id,
@@ -277,6 +289,8 @@ impl AionrsAgentManager {
         Ok(Self {
             runtime,
             engine: Mutex::new(engine),
+            vision,
+            original_image_capability: image_input_capability,
             slash_commands,
             mcp_managers: result.mcp_managers,
             approval_manager,
@@ -400,7 +414,7 @@ impl IAgentTask for AionrsAgentManager {
             attachment_count = data.files.len(),
             "Building structured Aionrs content blocks"
         );
-        let content_blocks = build_content_blocks(&data.content, &data.files);
+        let mut content_blocks = build_content_blocks(&data.content, &data.files);
         debug!(
             block_count = content_blocks.len(),
             "Built structured Aionrs content blocks"
@@ -422,6 +436,53 @@ impl IAgentTask for AionrsAgentManager {
 
         let mut engine = self.engine.lock().await;
         engine.set_next_turn_id(Some(turn_anchor));
+
+        if let Some(vision) = self.vision.as_ref() {
+            let preparation = tokio::select! {
+                ready = async { vision.lock().await.prepare(&mut engine, self.runtime.conversation_id(), has_image_attachment(&data.files)).await } => Some(ready),
+                _ = self.cancel_notify.notified() => None,
+            };
+            let Some(preparation) = preparation else {
+                engine.abort_current_turn("Vision preparation canceled by user");
+                self.runtime.emit_finish(None);
+                self.turn_finished_notify.notify_waiters();
+                return Ok(());
+            };
+            let capability = if preparation.is_ok() {
+                self.original_image_capability
+            } else {
+                ImageInputCapability::Unsupported
+            };
+            engine.apply_config_update(None, Some(capability), None, None, None, None);
+            if let Err(issue) = preparation {
+                if has_image_attachment(&data.files) {
+                    let error = AgentSendError::new(
+                        "图片识别未完成",
+                        AgentErrorCode::AionuiStateInconsistent,
+                        AgentErrorOwnership::Aionui,
+                        Some(issue.detail()),
+                        issue.reason != "disabled",
+                        false,
+                        None,
+                    );
+                    self.runtime.emit_error_data(error.stream_error().clone());
+                    self.turn_finished_notify.notify_waiters();
+                    return Err(error);
+                }
+                // Keep local slash commands on the existing single-block route.
+                if !data.content.trim_start().starts_with('/') {
+                    content_blocks.insert(
+                        0,
+                        ContentBlock::Text {
+                            text: format!(
+                                "[Host vision status] {} 当前仍可处理文字；不要声称已查看图片。",
+                                issue.detail()
+                            ),
+                        },
+                    );
+                }
+            }
+        }
 
         let result = tokio::select! {
             res = engine.run_with_blocks(content_blocks, &data.msg_id) => Some(res),
@@ -661,3 +722,7 @@ fn parse_session_mode(s: &str) -> SessionMode {
 #[cfg(test)]
 #[path = "agent_test.rs"]
 mod agent_test;
+
+#[cfg(test)]
+#[path = "agent_vision_test.rs"]
+mod agent_vision_test;

@@ -414,6 +414,7 @@ async fn get_capability_installations(
     State(state): State<SkillRouterState>,
     Extension(current_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<Vec<CapabilityInstallationResponse>>>, ApiError> {
+    let factory = load_factory_state(&state, &current_user.id).await?;
     let cache =
         load_preference::<CapabilityCatalogCache>(&state, &current_user.id, CAPABILITY_FACTORY_CATALOG_KEY).await?;
     let installations = load_preference::<Vec<CapabilityInstallationResponse>>(
@@ -423,14 +424,7 @@ async fn get_capability_installations(
     )
     .await?
     .unwrap_or_default();
-    let installations = compute_installation_states(
-        installations,
-        cache.as_ref(),
-        load_factory_state(&state, &current_user.id)
-            .await?
-            .last_error_code
-            .is_some(),
-    );
+    let installations = compute_installation_states(installations, cache.as_ref(), factory.last_error_code.is_some());
     Ok(Json(ApiResponse::ok(
         annotate_local_installation_states(&state, &current_user.id, installations).await?,
     )))
@@ -1007,14 +1001,30 @@ async fn save_preference<T: serde::Serialize>(
 }
 
 async fn load_factory_state(state: &SkillRouterState, user_id: &str) -> Result<CapabilityFactoryState, ApiError> {
-    if let Some(factory) = load_preference(state, user_id, CAPABILITY_FACTORY_STATE_KEY).await? {
+    let factory = load_preference::<CapabilityFactoryState>(state, user_id, CAPABILITY_FACTORY_STATE_KEY)
+        .await?
+        .unwrap_or_default();
+    // Keep state-only configurations working, but a saved client URL is authoritative.
+    let Some(saved_url) = load_preference::<String>(state, user_id, CAPABILITY_FACTORY_URL_KEY).await? else {
+        return Ok(factory);
+    };
+    let url = Some(saved_url.trim().to_string()).filter(|url| !url.is_empty());
+    if factory.url == url {
         return Ok(factory);
     }
-    let legacy_url = load_preference::<String>(state, user_id, CAPABILITY_FACTORY_URL_KEY).await?;
-    Ok(CapabilityFactoryState {
-        url: legacy_url,
+    // Catalog contents and validators belong to the old endpoint; installations do not.
+    state
+        .client_preference_repo
+        .delete_keys(user_id, &[CAPABILITY_FACTORY_CATALOG_KEY])
+        .await
+        .map_err(ExtensionError::from)?;
+    let factory = CapabilityFactoryState {
+        url,
         ..Default::default()
-    })
+    };
+    save_preference(state, user_id, CAPABILITY_FACTORY_STATE_KEY, &factory).await?;
+    info!(user_id = %user_id, "capability factory endpoint changed; catalog sync state reset");
+    Ok(factory)
 }
 
 async fn capability_catalog_snapshot(
@@ -1159,6 +1169,7 @@ async fn cached_capability_item(
     user_id: &str,
     installation: &CapabilityInstallationResponse,
 ) -> Result<CapabilityPlatformCatalogItem, ApiError> {
+    load_factory_state(state, user_id).await?;
     let cache = load_preference::<CapabilityCatalogCache>(state, user_id, CAPABILITY_FACTORY_CATALOG_KEY)
         .await?
         .ok_or_else(|| ExtensionError::InvalidRequest("CAPABILITY_CATALOG_NOT_SYNCED".to_string()))?;
@@ -2187,6 +2198,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_factory_url_change_refreshes_the_saved_endpoint_without_old_etag() {
+        let app = Router::new()
+            .route(
+                "/old/api/catalog",
+                get(|| async {
+                    (
+                        [(reqwest::header::ETAG, "\"shared-etag\"")],
+                        Json(serde_json::json!({
+                            "catalogVersion": "old", "items": [{ "id": "old-skill", "kind": "skill",
+                            "name": "Old", "description": "Old factory", "version": "1.0.0" }]
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/new/health",
+                get(|| async { Json(serde_json::json!({ "status": "ok", "version": "2.0.0", "capabilityCount": 1 })) }),
+            )
+            .route(
+                "/new/api/catalog",
+                get(|headers: axum::http::HeaderMap| async move {
+                    // A different factory may independently use the same ETag.
+                    if headers.contains_key(reqwest::header::IF_NONE_MATCH) {
+                        return StatusCode::NOT_MODIFIED.into_response();
+                    }
+                    (
+                        [(reqwest::header::ETAG, "\"shared-etag\"")],
+                        Json(serde_json::json!({
+                            "catalogVersion": "new", "items": [{ "id": "new-skill", "kind": "skill",
+                            "name": "New", "description": "New factory", "version": "1.0.0" }]
+                        })),
+                    )
+                        .into_response()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = make_state().await;
+        let user = CurrentUser::local_default();
+        let old_url = format!("http://{address}/old");
+        let new_url = format!("http://{address}/new");
+        save_preference(&state, &user.id, CAPABILITY_FACTORY_URL_KEY, &old_url)
+            .await
+            .unwrap();
+        let first = synchronize_capability_factory_for_user(&state, &user.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.items[0].id, "old-skill");
+
+        // Match the UI: test the new URL, save it, then refresh without a URL in the request body.
+        let health = get_capability_platform_health(Ok(Json(CapabilityPlatformCatalogRequest {
+            platform_url: new_url.clone(),
+        })))
+        .await
+        .unwrap();
+        assert_eq!(health.0.data.unwrap().status, "ok");
+        save_preference(&state, &user.id, CAPABILITY_FACTORY_URL_KEY, &new_url)
+            .await
+            .unwrap();
+        let refreshed = sync_capability_factory(State(state.clone()), Extension(user.clone()))
+            .await
+            .unwrap();
+        let refreshed = refreshed.0.data.unwrap();
+        assert_eq!(refreshed.items[0].id, "new-skill");
+        assert_eq!(refreshed.catalog_version.as_deref(), Some("new"));
+        let persisted = load_preference::<CapabilityFactoryState>(&state, &user.id, CAPABILITY_FACTORY_STATE_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.url.as_deref(), Some(new_url.as_str()));
+
+        // Failure at the unchanged URL must retain that factory's successful catalog.
+        server.abort();
+        server.await.unwrap_err();
+        assert!(
+            synchronize_capability_factory_for_user(&state, &user.id, true)
+                .await
+                .is_err()
+        );
+        let cached = capability_catalog_snapshot(&state, &user.id).await.unwrap();
+        assert_eq!(cached.items[0].id, "new-skill");
+        assert!(cached.stale);
+        assert_eq!(cached.last_successful_sync_at, refreshed.last_successful_sync_at);
+        assert_eq!(
+            load_factory_state(&state, &user.id)
+                .await
+                .unwrap()
+                .last_error_code
+                .as_deref(),
+            Some("CAPABILITY_FACTORY_UNAVAILABLE")
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_factory_url_change_resets_status_and_hides_the_old_catalog() {
+        let state = make_state().await;
+        let user = CurrentUser::local_default();
+        let old_factory = CapabilityFactoryState {
+            url: Some("http://old.test:8787".to_string()),
+            last_attempted_at: Some(10),
+            last_successful_sync_at: Some(10),
+            catalog_version: Some("old".to_string()),
+            etag: Some("old-etag".to_string()),
+            last_error_code: Some("old-error".to_string()),
+            last_error_message: Some("old error".to_string()),
+        };
+        save_preference(&state, &user.id, CAPABILITY_FACTORY_STATE_KEY, &old_factory)
+            .await
+            .unwrap();
+        let cache = CapabilityCatalogCache {
+            catalog: serde_json::from_value(serde_json::json!({ "items": [{ "id": "old-skill",
+                "kind": "skill", "name": "Old", "description": "Old factory", "version": "1.0.0" }] }))
+            .unwrap(),
+            synced_at: 10,
+        };
+        save_preference(&state, &user.id, CAPABILITY_FACTORY_CATALOG_KEY, &cache)
+            .await
+            .unwrap();
+        let installations: Vec<CapabilityInstallationResponse> = serde_json::from_value(serde_json::json!([{
+            "installationId": "skill:existing", "kind": "skill", "capabilityId": "existing",
+            "localResourceId": "existing", "installedVersion": "1.0.0", "factoryUrlSnapshot": "http://old.test:8787",
+            "installedAt": 1, "updatedAt": 1, "updatePolicy": "notify", "state": "installed"
+        }]))
+        .unwrap();
+        save_capability_installations(&state, &user.id, &installations)
+            .await
+            .unwrap();
+        // State-only configurations remain supported; other users stay isolated.
+        assert_eq!(load_factory_state(&state, &user.id).await.unwrap().url, old_factory.url);
+        assert_eq!(
+            capability_catalog_snapshot(&state, &user.id).await.unwrap().items.len(),
+            1
+        );
+
+        for url in ["  http://new.test:8080  ", "  "] {
+            save_preference(&state, &user.id, CAPABILITY_FACTORY_URL_KEY, &url)
+                .await
+                .unwrap();
+            let status = get_capability_factory_status(State(state.clone()), Extension(user.clone()))
+                .await
+                .unwrap()
+                .0
+                .data
+                .unwrap();
+            assert_eq!(
+                status.url.as_deref(),
+                if url.trim().is_empty() { None } else { Some(url.trim()) }
+            );
+            assert!(status.last_attempted_at.is_none());
+            assert!(status.last_successful_sync_at.is_none());
+            assert!(status.catalog_version.is_none());
+            assert!(status.etag.is_none());
+            assert!(status.last_error_code.is_none());
+            assert!(status.last_error_message.is_none());
+            let snapshot = capability_catalog_snapshot(&state, &user.id).await.unwrap();
+            assert!(snapshot.items.is_empty());
+            assert_eq!(snapshot.installations.len(), 1);
+            assert_eq!(snapshot.installations[0].installation_id, "skill:existing");
+            assert_eq!(snapshot.installations[0].factory_url_snapshot, "http://old.test:8787");
+        }
+        assert!(
+            synchronize_capability_factory_for_user(&state, &user.id, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let error = synchronize_capability_factory_for_user(&state, &user.id, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("CAPABILITY_FACTORY_NOT_CONFIGURED"));
+        assert!(load_factory_state(&state, "other-user").await.unwrap().url.is_none());
+    }
+
+    #[tokio::test]
     async fn scheduled_capability_sync_skips_users_without_a_factory_configuration() {
         let state = make_state().await;
         let result = synchronize_capability_factory_for_user(&state, "unconfigured-user", false)
@@ -2219,7 +2406,9 @@ mod tests {
             .unwrap();
         let etag = match first {
             CapabilityPlatformCatalogFetch::Modified { etag, .. } => etag.unwrap(),
-            CapabilityPlatformCatalogFetch::NotModified { .. } => panic!("first read must return a catalog"),
+            CapabilityPlatformCatalogFetch::NotModified { .. } => {
+                panic!("first read must return a catalog")
+            }
         };
         let second = fetch_capability_platform_catalog_with_etag(url, Some(&etag))
             .await

@@ -421,3 +421,62 @@ async fn status_on_a_dead_adapter_clears_the_vision_endpoint() {
 
     assert!(service.vision_mcp().await.is_none());
 }
+
+#[tokio::test]
+async fn vision_configuration_reads_saved_settings_before_any_status_poll() {
+    let port = spawn_fake_adapter(true).await;
+    let (service, _dir) = service_on(port).await;
+    assert!(service.vision_mcp().await.is_none(), "baseline cache starts empty");
+    let saved = service.vision_configuration().await.unwrap().unwrap();
+    assert_eq!(saved.url, "http://127.0.0.1:8102/mcp");
+    assert!(saved.enabled);
+}
+
+#[tokio::test]
+async fn vision_configuration_honors_disable_and_explicit_stop() {
+    let port = spawn_fake_adapter(false).await;
+    let (service, _dir) = service_on(port).await;
+    assert!(service.vision_configuration().await.unwrap().is_none());
+    service
+        .adapter_action(aionui_api_types::BaitongAdapterAction::Stop)
+        .await
+        .unwrap();
+    let error = service.vision_configuration().await.unwrap_err();
+    assert_eq!(
+        error.code(),
+        "BAITONG_NETWORK_ERROR",
+        "stop must not relaunch the invalid executable"
+    );
+}
+
+#[tokio::test]
+async fn vision_configuration_uses_saved_port_without_running_models() {
+    let mut body = state_body(true);
+    body["adapter"]["state"] = json!("stopped");
+    body["models"]["items"] = json!([]);
+    body["config"]["port"] = json!(19123);
+    let app = Router::new()
+        .route("/control/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .route(
+            "/control/state",
+            get(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (service, _dir) = service_on(port).await;
+    assert_eq!(
+        service.vision_configuration().await.unwrap().unwrap().url,
+        "http://127.0.0.1:19123/mcp"
+    );
+    task.abort();
+    assert_eq!(
+        service.vision_configuration().await.unwrap_err().code(),
+        "BAITONG_NETWORK_ERROR"
+    );
+}

@@ -1,5 +1,7 @@
+use aion_agent::host_skills::HostSkillSource;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use aion_config::compat::OpenAiApiMode;
 use aion_types::message::ImageInputCapability;
@@ -127,6 +129,21 @@ pub struct AionrsCompatOverrides {
     pub api_path: Option<String>,
 }
 
+/// Baitong-only runtime preparation; ordinary providers leave this absent.
+#[derive(Clone)]
+pub struct BaitongVisionConfig {
+    pub(crate) service: Option<Arc<aionui_baitong::BaitongService>>,
+    pub(crate) override_config: Option<aion_config::config::McpServerConfig>,
+}
+
+impl std::fmt::Debug for BaitongVisionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BaitongVisionConfig")
+            .field("user_override", &self.override_config.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Fully resolved Aionrs configuration passed to the agent manager.
 #[derive(Debug, Clone)]
 pub struct AionrsResolvedConfig {
@@ -157,6 +174,10 @@ pub struct AionrsResolvedConfig {
     pub session_mode: Option<String>,
     /// Resolved skill names from the conversation snapshot.
     pub skills: Vec<String>,
+    /// Optional conversation-scoped skill reader supplied by the host factory.
+    pub host_skills: Option<Arc<dyn HostSkillSource>>,
+    /// Optional host-managed vision preparation, independent of the old endpoint cache.
+    pub vision: Option<BaitongVisionConfig>,
     /// Extra MCP servers to inject (team coordination or guide).
     pub extra_mcp_servers: HashMap<String, aion_config::config::McpServerConfig>,
     /// AWS Bedrock credentials (region + access key or profile).

@@ -66,9 +66,8 @@ pub struct BaitongService {
     managed_sink: Option<Arc<dyn ManagedProviderSink>>,
     /// Last observed vision-MCP endpoint, refreshed by every `compose`.
     ///
-    /// In-memory only: the agent factory reads it per session build, and nothing
-    /// about it belongs in a table (see `factory::aionrs` for why a built-in
-    /// `mcp_server` row would never reach aionrs).
+    /// Legacy observed-state cache. Session preparation reads saved settings
+    /// through `vision_configuration` instead of relying on this cache.
     vision_mcp: Mutex<Option<VisionMcp>>,
 }
 
@@ -96,11 +95,33 @@ impl BaitongService {
 
     /// Vision MCP endpoint of the adapter as last observed.
     ///
-    /// `None` when the adapter is not running (or not yet observed). The agent
-    /// factory injects it into aionrs sessions whose model belongs to the
-    /// built-in provider, so the model can call `look_at_image`.
+    /// `None` when the adapter is not running (or not yet observed).
+    /// This legacy observation is not the configuration source for sessions.
     pub async fn vision_mcp(&self) -> Option<VisionMcp> {
         self.vision_mcp.lock().await.clone()
+    }
+
+    /// Read saved vision settings from the control service, independently of API readiness.
+    /// Unlike `status`, failures never become a synthetic default configuration.
+    pub async fn vision_configuration(&self) -> Result<Option<VisionMcp>, BaitongError> {
+        if self.pending_restore.load(Ordering::SeqCst) {
+            self.status().await?;
+        }
+        let client = self
+            .client_if_running()
+            .await
+            .ok_or_else(|| BaitongError::Unreachable("adapter control service is not running".to_owned()))?;
+        let state = client.state().await?;
+        if !state.config.vision_mcp_enabled {
+            return Ok(None);
+        }
+        if state.config.port < 1024 {
+            return Err(BaitongError::BadRequest("invalid saved model service port".to_owned()));
+        }
+        Ok(Some(VisionMcp {
+            url: format!("http://127.0.0.1:{}/mcp", state.config.port),
+            enabled: true,
+        }))
     }
 
     /// Push the row to the sink. Best effort: a provider write failure must never

@@ -22,7 +22,7 @@ async fn assert_no_stop_signal(agent: &AionrsAgentManager) {
     );
 }
 
-fn make_test_config() -> AionrsResolvedConfig {
+pub(super) fn make_test_config() -> AionrsResolvedConfig {
     AionrsResolvedConfig {
         provider: "anthropic".into(),
         api_key: "sk-test-key".into(),
@@ -37,6 +37,8 @@ fn make_test_config() -> AionrsResolvedConfig {
         session_directory: env::temp_dir().join("aionrs-test-sessions"),
         session_mode: None,
         skills: Vec::new(),
+        host_skills: None,
+        vision: None,
         extra_mcp_servers: HashMap::new(),
         bedrock_config: None,
         runtime_env: Vec::new(),

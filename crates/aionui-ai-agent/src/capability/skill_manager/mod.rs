@@ -7,6 +7,7 @@ use regex::Regex;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+mod host_skill_source;
 mod prompt_builder;
 pub use prompt_builder::*;
 

@@ -25,23 +25,65 @@ use crate::factory::context::FactoryContext;
 use crate::manager::aionrs::{AionrsAgentManager, sanitize_session_messages};
 use crate::runtime_status::conversation_runtime_reporter;
 use crate::session_context::AionrsSessionBuildContext;
-use crate::types::{AionrsCompatOverrides, AionrsResolvedConfig};
+use crate::types::{AionrsCompatOverrides, AionrsResolvedConfig, BaitongVisionConfig};
 
-/// Render this conversation's skills index, or `""` when there is nothing to add.
-async fn skill_index_text(deps: &AgentFactoryDeps, user_id: &str, skills: &[String]) -> String {
-    let index = deps.skill_manager.discover_by_names_for_user(user_id, skills).await;
-    crate::capability::skill_manager::build_skills_index_text(&index)
-}
-
-/// Append the index to the system prompt, keeping the assistant's own rules in
-/// the leading position.
-///
-/// Pure so the composition rules are testable without standing up a factory.
-fn merge_skill_index_into_system_prompt(system_prompt: Option<String>, index: &str) -> Option<String> {
-    match (system_prompt, index.is_empty()) {
-        (prompt, true) => prompt,
-        (Some(prompt), false) => Some(format!("{prompt}\n\n{index}")),
-        (None, false) => Some(index.to_owned()),
+async fn prepare_baitong_vision(
+    platform: &str,
+    service: Option<Arc<aionui_baitong::BaitongService>>,
+    extra_mcp_servers: &mut HashMap<String, McpServerConfig>,
+    conversation_id: &str,
+) -> Option<BaitongVisionConfig> {
+    if platform == aionui_api_types::BAITONG_PLATFORM {
+        let initial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let override_config = extra_mcp_servers.get("vision").cloned();
+        if override_config.is_some() {
+            info!(
+                conversation_id,
+                desired_enabled = true,
+                configuration_source = "user_override",
+                "Baitong vision configuration resolved"
+            );
+        } else if let Some(service) = service.as_ref() {
+            let configuration = tokio::time::timeout_at(initial_deadline, service.vision_configuration()).await;
+            match configuration {
+                Ok(Ok(saved)) => {
+                    info!(
+                        conversation_id,
+                        desired_enabled = saved.is_some(),
+                        configuration_source = "saved_settings",
+                        "Baitong vision configuration resolved"
+                    );
+                    if let Some((name, mut config)) = baitong_vision_mcp_server(saved) {
+                        config.startup_timeout_ms = Some(
+                            initial_deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .as_millis()
+                                .max(1) as u64,
+                        );
+                        extra_mcp_servers.entry(name).or_insert(config);
+                    }
+                }
+                _ => {
+                    warn!(
+                        conversation_id,
+                        failure_stage = "configuration",
+                        "Baitong vision preparation unavailable"
+                    )
+                }
+            }
+        } else {
+            warn!(
+                conversation_id,
+                failure_stage = "host_service",
+                "Baitong vision preparation unavailable"
+            );
+        }
+        Some(BaitongVisionConfig {
+            service,
+            override_config,
+        })
+    } else {
+        None
     }
 }
 
@@ -66,30 +108,11 @@ pub(super) async fn build(
         });
     }
 
-    // Fold the skills index into the system prompt.
-    //
-    // aionrs is a layer-2 vendor with no prompt pipeline: index injection has
-    // always lived in the ACP hook, which this factory never runs. Its skills
-    // reached it only through the workspace `.aionrs/skills` links that this
-    // refactor removes, so without this the backend would lose skills outright.
-    // `system_prompt` is its one always-present channel.
-    //
-    // Deliberately NOT routed through `resolve_skill_delivery` (unlike the ACP
-    // and Antigravity lanes), and it emits no "resolved delivery plan" anchor
-    // log. That is intentional, not an oversight: aionrs is an in-process agent
-    // compiled into aioncore, so it has neither a launch-argument channel (argv)
-    // nor a wire protocol (protocol) -- `system_prompt` injection is the only
-    // delivery it can physically perform. Its `skill_delivery` column therefore
-    // has no applicable value other than `injected` (its NULL default), so
-    // reading it would only ever fetch a metadata row and compute a plan this
-    // lane cannot use. If aionrs ever gains a real native skill channel (e.g.
-    // reading the session-skills view directory directly), that is a change in
-    // the aionrs crate itself, and this is where it would re-join the shared
-    // delivery decision.
-    overrides.system_prompt = merge_skill_index_into_system_prompt(
-        overrides.system_prompt.take(),
-        &skill_index_text(&deps, &ctx.user_id, &resolved_skills).await,
-    );
+    // The bootstrap renders its index from this same conversation-scoped source.
+    let host_skills = deps
+        .skill_manager
+        .host_skill_source_for_user(&ctx.user_id, &resolved_skills)
+        .await;
 
     let provider_id = &model.provider_id;
     let row = deps
@@ -122,18 +145,13 @@ pub(super) async fn build(
     )
     .await;
 
-    // Lowest priority: a user who already added their own `vision` server keeps
-    // theirs. Only the built-in Baitong provider gets this, and only while the
-    // adapter reports the vision MCP switch on. Without it aionrs marks the
-    // model image-capable and keeps `ViewImage`, but the upstream model is
-    // text-only and can only "see" through the adapter's `look_at_image` tool.
-    let vision = match deps.baitong.as_ref() {
-        Some(baitong) if row.platform == aionui_api_types::BAITONG_PLATFORM => baitong.vision_mcp().await,
-        _ => None,
-    };
-    if let Some((name, config)) = baitong_vision_mcp_server(vision) {
-        extra_mcp_servers.entry(name).or_insert(config);
-    }
+    let vision = prepare_baitong_vision(
+        &row.platform,
+        deps.baitong.clone(),
+        &mut extra_mcp_servers,
+        &ctx.conversation_id,
+    )
+    .await;
 
     if !extra_mcp_servers.is_empty() {
         info!(
@@ -209,6 +227,8 @@ pub(super) async fn build(
         session_directory,
         session_mode: overrides.session_mode,
         skills: resolved_skills,
+        host_skills: Some(host_skills),
+        vision,
         extra_mcp_servers,
         bedrock_config,
         runtime_env: ctx.runtime_env,
@@ -2337,53 +2357,6 @@ mod tests {
         assert!(resolve_bedrock_config(Some("not-json")).is_none());
     }
 
-    /// aionrs is layer 2 and has no prompt pipeline, so `system_prompt` is its
-    /// only injection channel. Its skills used to arrive solely through the
-    /// workspace `.aionrs/skills` links this refactor removes.
-    #[test]
-    fn the_skills_index_is_appended_after_the_assistant_rules() {
-        let index = crate::capability::skill_manager::build_skills_index_text(&[
-            crate::capability::skill_manager::SkillIndex {
-                name: "cron".into(),
-                description: "Schedule stuff".into(),
-            },
-        ]);
-        let merged =
-            merge_skill_index_into_system_prompt(Some("Be concise.".to_owned()), &index).expect("a prompt exists");
-
-        assert!(
-            merged.starts_with("Be concise."),
-            "assistant rules keep the lead: {merged}"
-        );
-        assert!(merged.contains("## Available Skills"));
-        assert!(merged.contains("- **cron**: Schedule stuff"));
-        assert!(merged.contains("skills show"), "channel A first");
-        assert!(merged.contains("[LOAD_SKILL:"), "channel B as the fallback");
-    }
-
-    #[test]
-    fn no_skills_leaves_the_system_prompt_untouched() {
-        assert_eq!(
-            merge_skill_index_into_system_prompt(Some("Be concise.".to_owned()), ""),
-            Some("Be concise.".to_owned())
-        );
-        assert_eq!(merge_skill_index_into_system_prompt(None, ""), None);
-    }
-
-    /// An assistant with no rules but with skills must still get the index —
-    /// otherwise a default assistant silently loses every skill.
-    #[test]
-    fn skills_alone_still_produce_a_system_prompt() {
-        let index = crate::capability::skill_manager::build_skills_index_text(&[
-            crate::capability::skill_manager::SkillIndex {
-                name: "cron".into(),
-                description: "d".into(),
-            },
-        ]);
-        let merged = merge_skill_index_into_system_prompt(None, &index).expect("skills alone produce a prompt");
-        assert!(merged.starts_with("## Available Skills"));
-    }
-
     #[test]
     fn preset_rules_merged_into_system_prompt_when_no_existing() {
         let json = serde_json::json!({
@@ -2479,3 +2452,7 @@ mod tests {
         assert!(baitong_vision_mcp_server(None).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "baitong_vision_test.rs"]
+mod baitong_vision_test;

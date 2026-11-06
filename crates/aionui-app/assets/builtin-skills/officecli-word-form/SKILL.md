@@ -53,9 +53,23 @@ If the install command above fails (e.g. blocked by security policy, no network 
 
 This skill teaches what a real form needs, not every CLI flag. When a prop / alias / enum is uncertain, consult help BEFORE guessing: `officecli help docx [element] [--json]` (e.g. `sdt`, `formfield`, `field`). Help is pinned to the installed CLI version and is authoritative — when this skill and help disagree, **help wins** (the prop set on `sdt` in particular has grown over time; trust `help docx sdt`, not a hardcoded list).
 
+## Windows execution and delivery rules
+
+Check the actual shell first: `$PSVersionTable.PSVersion.ToString()`. Windows PowerShell 5.1 loses embedded double quotes in common native-process argument shapes. Setting `Console.OutputEncoding` does not repair native argument quoting or file decoding.
+
+- Use the dedicated **Write** tool to save complex batch commands as a UTF-8 JSON file. Then run `officecli batch 'form.docx' --input 'form-commands.json'`. Do not pass a complex JSON array through `--commands` in Windows PowerShell 5.1. Each batch item is an object with a bare `command` verb and sibling argument fields, not a complete shell command string.
+- A single CLI property uses `--prop key=value`, not `--props`. Do not invent a `create-word-form` subcommand. Check `officecli help add`, `officecli help docx sdt`, and `officecli help docx formfield` before building controls. Prefer native SDT/formfield commands to raw XML; this form does not require a hand-written document XML replacement.
+- Read UTF-8 files with `Get-Content -LiteralPath 'file.xml' -Raw -Encoding UTF8`, or explicit UTF-8 byte decoding. The default 5.1 file encoding can corrupt Chinese text even when console output is UTF-8.
+- A DOM address such as `/body` is not an XML XPath. For `raw-set`, inspect the XML and use its real namespace-qualified path, for example `/w:document/w:body`. Do not use `/document/body` as an unqualified XPath.
+- Do not interpolate XML with quoted attributes into a native `--xml` argument on 5.1. If raw XML is genuinely required, first confirm an XML payload route from the installed CLI's help, such as a supported batch operation read from a file. Do not invent `--xml-file`, guess batch fields, or keep trying random escaping. If a verified route is unavailable, report the precise blocker and retain the document already produced.
+- Read every exit code, warning and resulting property. `Batch complete` proves only that those items ran. An `UNSUPPORTED` warning means the requested property is not verified, including when the batch exits 0.
+- Close/save before recreating a document or inspecting it from another program. `create` does not overwrite an existing file by default. Work on a new output path unless the user requested replacement; do not delete an existing document to make a retry succeed.
+
+Before claiming completion, run the existing Delivery Gate with Windows-equivalent checks: inspect `officecli view 'form.docx' forms`, query SDT/formfield elements, verify required field types/tags and real checkboxes, and run `officecli validate 'form.docx'`. Enable protection with `officecli set 'form.docx' / --prop protection=forms`, close/save, and read `officecli get 'form.docx' / --json`: `protection` must be `forms` and `protectionEnforced` must be true. Reopen in Word/WPS when available to verify fields and checkboxes remain editable while other content is protected; report any interactive verification still pending. A file's existence or successful layout batch is not completion evidence.
+
 ## Mental Model & Inheritance
 
-A Word form is a `.docx` plus four OpenXML payload layers plain-docx skills do not touch: **`<w:sdt>`** content controls (types: text / richtext / dropdown / combobox / date / picture / group), **`<w:ffData>`** legacy FormField (still the only way to get a real checkbox — SDT `type=checkbox` is not implemented), **`<w:fldChar>`** complex fields (MERGEFIELD, REF, PAGEREF, SEQ, IF — template-time, not user-fill), and **`documentProtection`** (the lock that makes non-field text read-only in Word — and, on the CLI, `protection=forms` locks non-field content edits (those need `--force` or `raw-set`) but still allows form-field (SDT) edits, which is the point of forms protection).
+A Word form is a `.docx` plus four OpenXML payload layers plain-docx skills do not touch: **`<w:sdt>`** content controls (types: text / richtext / dropdown / combobox / date / picture / group), **`<w:ffData>`** legacy FormField (a compatible checkbox option; current CLI help also advertises SDT `type=checkbox`), **`<w:fldChar>`** complex fields (MERGEFIELD, REF, PAGEREF, SEQ, IF — template-time, not user-fill), and **`documentProtection`** (the form-protection metadata interpreted by Word/WPS; verify actual application behavior rather than assuming the CLI enforces the same editing restrictions).
 
 **No inheritance from docx v2.** docx's Delivery Gate (cover-fill %, live-PAGE check) does NOT apply — form QA is `view forms` + `query sdt alias+tag` + `protectionEnforced`.
 
@@ -73,7 +87,7 @@ A Word form is a `.docx` plus four OpenXML payload layers plain-docx skills do n
 
 **`WARNING: UNSUPPORTED` (exit 2) is a silently-wrong element.** The CLI created the element *without* the rejected prop. Any UNSUPPORTED in your build log means a prop name the current CLI does not accept on that element — stop, check `help docx <element>` for the right prop name (most SDT props such as `items`/`format`/`lock` ARE accepted now; `maxlength` is not), fix the command, and re-run. Do not ship on top.
 
-**`protection=forms` is the LAST structural command.** Once it is set, `protection=forms` locks non-field content (those edits need `--force` or `raw-set`) but still allows form-field (SDT) edits — which is the point of forms protection. A non-field content edit (e.g. `set /body/p[N] --prop text=`) is refused (`ERROR: Document is protected … use --force`); a form-field edit (e.g. `set /body/sdt[N] --prop text=` / `--prop alias=`) succeeds (exit 0). Use `Query("editable")` to find fillable fields. So finish all non-field (static layout) edits first, then lock; if you must edit static content afterward, pass `--force` (or temporarily clear protection, edit, re-lock).
+**`protection=forms` is the LAST structural command.** Finish static layout, set protection, save/close and verify it. Do not use a successful or rejected CLI edit as proof of Word/WPS restrictions: OfficeCLI 1.0.159 accepted a non-field paragraph edit in a local protected-document probe even though `protection=forms` and `protectionEnforced=true` remained present. The installed document help reports protection properties as `enforcement=report`. Verify user-facing editability in Word/WPS; use Query("editable") only as a structural aid, not an application-level acceptance result.
 
 ### `--after find:` micro-playbook
 
@@ -109,7 +123,7 @@ A real fillable form requires **structured fields** + **document protection**.
 
 **Do not simulate fields with underscores.** `姓名：_______________` produces zero structured data and leaks past every verification. Always use `--type sdt` or `--type formfield`.
 
-**Checkbox is formfield, NOT SDT.** `--type sdt --prop type=checkbox` exits 1 (`SDT type 'checkbox' is not implemented`). Every checkbox in every recipe uses `--type formfield --prop type=checkbox`.
+**Checkbox support is version-dependent; check help first.** OfficeCLI 1.0.159 advertises both SDT `type=checkbox` and legacy formfield checkboxes. The legacy recipes below remain valid; do not claim SDT checkboxes are unavailable when the installed help lists them.
 
 **MERGEFIELD is a separate track.** `view forms` lists SDT + formfield only; `query field` lists complex fields only. Two disjoint inventories; both valid in one file.
 
@@ -166,7 +180,7 @@ officecli raw-set "$FILE" /document \
 
 ### Path C — Word template (only what no API reaches)
 
-**Use when**: a **real SDT checkbox** (`type=checkbox` still exits 1 — use a legacy FormField instead, see §Legacy FormField), a `placeholderDocPart` prompt-text part, or custom richtext appearance / cross-part nesting beyond `--prop` reach. Picture and grouped SDTs are NO LONGER here — they add fine via Path A.
+**Use when**: a `placeholderDocPart` prompt-text part, or custom richtext appearance / cross-part nesting beyond `--prop` reach. Picture and grouped SDTs are NO LONGER here — they add fine via Path A.
 
 ```bash
 # One-time in Word: Developer tab → Insert Content Control → Save as template.docx
@@ -189,7 +203,7 @@ officecli set "$FILE" / --prop protection=forms
 | dropdown whose stored value ≠ display text | **B** | raw-set append `<w:listItem w:value=…>` |
 | real checkbox | **FormField** | `--type formfield --prop type=checkbox` (see §Legacy FormField) |
 | mail-merge placeholder | **MERGEFIELD** | `--type field --prop fieldType=mergefield` (see §MERGEFIELD) |
-| real SDT checkbox / placeholder part / custom appearance | **C** | build skeleton in Word, fill via CLI |
+| placeholder part / custom appearance beyond installed CLI help | **C** | build skeleton in Word, fill via CLI |
 
 ## Quick Start — Path A + FormField (minimal intake form)
 
@@ -306,7 +320,7 @@ officecli get "$FILE" '/body/sdt[N]'   # expect: type=date format=yyyy年MM月dd
 
 ## Path C — Word template workflow
 
-For fields CLI cannot express (signature `picture` SDT, real SDT checkbox, `placeholderDocPart` prompt text, grouped SDTs, custom richtext styling), build the skeleton once in Word, then fill via CLI.
+For fields the installed CLI help cannot express (such as a `placeholderDocPart` prompt text part or unsupported custom richtext styling), build the skeleton once in Word, then fill via CLI.
 
 **One-time in Word:** File → Options → Customise Ribbon → Developer. Developer tab → Insert Picture / Check Box / Grouping Content Control → right-click → Properties → set Title (`alias`) + Tag. Save as `template.docx`.
 
@@ -374,7 +388,7 @@ Use FormField **when you need a real checkbox**. For text/dropdown, prefer SDT.
 `help docx formfield`: `type` (text/checkbox/check/dropdown), `name` (required, **≤ 20 chars** — OpenXML schema MaxLength; add passes longer but `validate` rejects), `text` (text only, alias `value`), `checked` (checkbox only).
 
 ```bash
-# CHECKBOX — the only real checkbox (SDT type=checkbox is not implemented)
+# LEGACY CHECKBOX — supported alongside SDT checkbox when listed by installed help
 officecli add "$FILE" /body --type formfield --prop type=checkbox \
   --prop name=agree_terms --prop checked=false
 
@@ -411,13 +425,13 @@ officecli get "$FILE" /                                  # look for: protectionE
 
 | Mode | Word user can | CLI behavior |
 |---|---|---|
-| `forms` | Fill SDT + formfield only | Form-field (SDT) edits work (exit 0); non-field content edits need `--force` or `raw-set` |
-| `readOnly` | Read only | Non-field edits need `--force`; raw-set bypasses |
-| `comments` | Add comments only | Non-field edits need `--force`; raw-set bypasses |
-| `trackedChanges` | Edit with tracked changes only | Non-field edits need `--force`; raw-set bypasses |
+| `forms` | Intended form-filling restriction; verify in Word/WPS | CLI metadata readback alone does not establish edit enforcement; 1.0.159 accepted a non-field edit locally |
+| `readOnly` | Read only | Check installed CLI behavior and verify in Word/WPS; no local enforcement claim for this mode |
+| `comments` | Add comments only | Check installed CLI behavior and verify in Word/WPS; no local enforcement claim for this mode |
+| `trackedChanges` | Edit with tracked changes only | Check installed CLI behavior and verify in Word/WPS; no local enforcement claim for this mode |
 | `none` | Full editing | All ops work |
 
-**KEY:** Document protection restricts Word users AND the CLI. Under `protection=forms`, form-field (SDT) edits — `set /body/sdt[N] --prop text=` / `--prop alias=` — succeed (exit 0); this is the point of forms protection. Only NON-field content edits (e.g. `set /body/p[N] --prop text=`) are refused with `ERROR: Document is protected (mode: forms). … use --force to override`; pass `--force` (or `raw-set`, the only verb that fully bypasses protection) to edit static content anyway. Use `Query("editable")` to find the fields a Word user could still fill.
+**KEY:** Protection readback and Word/WPS editing behavior are separate checks. Require `forms/true` after save/close, then test that fields are editable and static content is protected in the target application. Do not claim that all CLI non-field edits are refused or that a CLI field edit proves the full interactive requirement. Preserve the document and report the unverified application check when Word/WPS is unavailable.
 
 ### Lock values (settable on `add` and `set`)
 
@@ -643,23 +657,28 @@ SDT_MISSING=$(officecli query "$FILE" sdt --json | jq '[.data.results[] | select
 
 # Gate 5 — Protection enforced + per-field lock inventory
 PROT=$(officecli get "$FILE" / --json | jq -r '.data.results[0].format.protection // "none"')
-[ "$PROT" = "forms" ] && echo "Gate 5 OK (protection=forms enforced)" || { echo "REJECT Gate 5: protection is '$PROT', expected 'forms'"; exit 1; }
+ENFORCED=$(officecli get "$FILE" / --json | jq -r '.data.results[0].format.protectionEnforced // false')
+[ "$PROT" = "forms" ] && [ "$ENFORCED" = "true" ] && echo "Gate 5 OK (forms/true metadata; Word/WPS interaction still needs verification)" || { echo "REJECT Gate 5: protection='$PROT', enforced='$ENFORCED', expected forms/true"; exit 1; }
 officecli view "$FILE" forms | head -40   # visual spot-check: every dropdown shows items=; every date shows format=; every locked SDT shows lock=
 
-# Gate 6 — No type=checkbox leaked onto any SDT
-BAD_CB=$(officecli query "$FILE" sdt --json | jq '[.data.results[] | select(.format.type == "checkbox")] | length')
-[ "$BAD_CB" -eq 0 ] && echo "Gate 6 OK (no SDT checkbox — formfield only)" || { echo "REJECT Gate 6: $BAD_CB SDT with type=checkbox"; exit 1; }
+# Gate 6 — Real checkbox inventory; set EXPECTED_CHECKBOXES from the request when checkboxes are required.
+SDT_CB=$(officecli query "$FILE" sdt --json | jq '[.data.results[] | select(.format.type == "checkbox")] | length')
+FF_CB=$(officecli query "$FILE" formfield --json | jq '[.data.results[] | select(.format.type == "checkbox")] | length')
+CB_TOTAL=$((SDT_CB + FF_CB))
+[ "$CB_TOTAL" -ge "${EXPECTED_CHECKBOXES:-0}" ] && echo "Gate 6 OK ($CB_TOTAL real checkboxes)" || { echo "REJECT Gate 6: $CB_TOTAL checkboxes, expected at least $EXPECTED_CHECKBOXES"; exit 1; }
 ```
 
 **Why `view issues` is not a gate.** It runs only prose-style checks (first-line-indent, heading size) and flags every form label as `Body paragraph missing first-line indent` — a false-positive avalanche on forms. Ignore for this skill. Use `validate` (schema integrity) and `view forms` (field inventory).
 
 ## Known Issues
 
+These are version-dependent observations. The installed CLI help and actual readback take precedence; do not route to raw XML or a Word template based only on a historical limitation below.
+
 | # | Issue | Behavior | Workaround |
 |---|---|---|---|
-| K1 | SDT `type=checkbox` not implemented | `add ... --type sdt --prop type=checkbox` → `Error: SDT type 'checkbox' is not implemented`, exit 1 (error now lists the supported types incl. group/picture) | Use `--type formfield --prop type=checkbox` |
+| K1 | Older versions lacked SDT checkbox | OfficeCLI 1.0.159 help now lists SDT `type=checkbox`; the old unconditional limitation is obsolete | Check installed help; native SDT or legacy formfield checkboxes are both options |
 | K3 | SDT `maxlength` UNSUPPORTED on `add` | `WARNING: UNSUPPORTED: maxlength`, exit 2; element still created. (`items` / `format` / `lock` / `placeholderText` are NOW supported on `add` — only `maxlength` is rejected; `name` is accepted but a no-op on SDT — use `alias`/`tag`) | Enforce length downstream; use `text` for initial content |
-| K4 | SDT `items` / `format` / `type` not settable AFTER creation | `set --prop items=...` → `UNSUPPORTED props (use raw-set instead)`. (They ARE settable on `add` — set them inline at creation) | Set at `add` time; to change later, Path B `raw-set` or `remove` + re-add |
+| K4 | SDT variant is creation-only | 1.0.159 help marks `type` set=false, but `items` and date `format` set=true | Choose type at add-time; check help before using native set for other properties |
 | K5 | FormField `maxlength` UNSUPPORTED | `WARNING: UNSUPPORTED: maxlength`; formfield created | Enforce length in downstream validation |
 | K6 | FormField dropdown `items` UNSUPPORTED | Dropdown formfield is created with empty option list | Use an SDT dropdown with `--prop items=` instead |
 | K7 | Watermark `width` / `height` not settable | Watermark created without them; `opacity` IS settable on `add` and reads back (real dims are computed) | For an exact size, open Word + adjust the shape (Phase 2) |

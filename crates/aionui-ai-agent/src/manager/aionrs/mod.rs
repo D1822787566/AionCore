@@ -1,5 +1,6 @@
 mod content;
 mod error;
+mod vision;
 
 pub mod agent;
 pub mod history_sanitize;
