@@ -374,7 +374,10 @@ impl IConversationRepository for SqliteConversationRepository {
             set_parts.push("updated_at = ?".to_string());
             binds.push(BindValue::I64(updated_at));
         }
-        if let Some(ref project_id) = updates.project_id {
+        if updates.clear_project_binding {
+            set_parts.push("project_id = NULL".to_string());
+            set_parts.push("folder_id = NULL".to_string());
+        } else if let Some(ref project_id) = updates.project_id {
             set_parts.push("project_id = ?".to_string());
             binds.push(BindValue::Str(project_id.clone()));
         }

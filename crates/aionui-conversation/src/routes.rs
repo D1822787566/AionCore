@@ -120,6 +120,7 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations", post(create).get(list))
         .route("/api/conversations/{id}", get(get_one).patch(update).delete(delete_one))
         .route("/api/conversations/{id}/reset", post(reset))
+        .route("/api/conversations/{id}/project-directory", post(switch_workspace))
         .route("/api/conversations/{id}/fork", post(fork))
         .route("/api/conversations/{id}/associated", get(associated))
         .route("/api/conversations/{id}/compaction-audit", get(list_compaction_audit))
@@ -150,6 +151,20 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
 }
 
 // ── Handlers ───────────────────────────────────────────────────────
+
+async fn switch_workspace(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<aionui_api_types::SwitchConversationWorkspaceRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ConversationResponse>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    let result = state
+        .service
+        .switch_workspace(&user.id, &id, req, &state.task_manager)
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
 
 async fn create(
     State(state): State<ConversationRouterState>,

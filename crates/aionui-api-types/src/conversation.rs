@@ -1202,3 +1202,14 @@ mod tests {
         assert_eq!(raw["payload"]["name"], "daily-report");
     }
 }
+
+/// Explicit directory change, separate from arbitrary extra updates.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchConversationWorkspaceRequest {
+    pub project_id: Option<String>,
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub restore_default: bool,
+    pub expected_workspace: String,
+}

@@ -112,7 +112,8 @@ pub use conversation::{
     EnsureConversationRuntimeResponse, ForkCapabilityView, ForkConversationRequest, ListConversationsQuery,
     ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse, MessageResponse, MessageSearchItem,
     MessageSearchResponse, MessageStatusChangedPayload, PromptCapabilityView, SearchMessagesQuery, SendMessageRequest,
-    SendMessageResponse, SessionRef, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    SendMessageResponse, SessionRef, SwitchConversationWorkspaceRequest, UpdateConversationArtifactRequest,
+    UpdateConversationRequest,
 };
 pub use conversation_tools::{
     CONVERSATION_TOOLS_SCHEMA_VERSION, ConversationCliEnvelope, ConversationCliMeta, ConversationCreateAssistant,

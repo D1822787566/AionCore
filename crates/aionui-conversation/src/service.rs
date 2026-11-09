@@ -1259,6 +1259,7 @@ impl ConversationService {
             std::fs::create_dir_all(&ws_path)
                 .map_err(|e| ConversationError::internal(format!("Failed to create workspace: {e}")))?;
             extra["workspace"] = serde_json::Value::String(ws_path.to_string_lossy().into_owned());
+            extra["default_workspace"] = extra["workspace"].clone();
         }
 
         // Strip the request-only custom_workspace toggle — it was read above
@@ -2267,6 +2268,7 @@ impl ConversationService {
         // `conversation.listChanged(updated)` so the client refetches and picks
         // up the now-bound project_id (parity with create-time delivery).
         let project_backfilled = if row.project_id.is_none()
+            && extra.get("using_default_workspace").and_then(|v| v.as_bool()) != Some(true)
             && let Some(workspace) = extra
                 .get("workspace")
                 .and_then(|v| v.as_str())
@@ -2384,6 +2386,16 @@ impl ConversationService {
 
         let existing_type: AgentType = string_to_enum(&existing.r#type)?;
 
+        if req.extra.as_ref().is_some_and(|extra| {
+            ["workspace", "default_workspace", "using_default_workspace"]
+                .iter()
+                .any(|key| extra.get(key).is_some())
+        }) {
+            return Err(ConversationError::bad_request(
+                "use the project-directory operation to change workspace",
+            ));
+        }
+
         // Snapshot invariant: once written at create time, `extra.skills`
         // must not be re-shaped by PATCH. The frontend must clone the
         // conversation to produce a new snapshot.
@@ -2493,6 +2505,7 @@ impl ConversationService {
             updated_at: Some(now),
             project_id: None,
             folder_id: None,
+            clear_project_binding: false,
             name_source,
         };
 
@@ -4793,6 +4806,11 @@ impl ConversationService {
         task_manager: &Arc<dyn IWorkerTaskManager>,
         phase: &'static str,
     ) -> Result<(AgentInstance, bool), ConversationError> {
+        if self.runtime_state.is_restarting(conversation_id) && phase != "runtime_restart" {
+            return Err(ConversationError::RuntimeRestarting {
+                conversation_id: conversation_id.to_owned(),
+            });
+        }
         let row = self
             .conversation_repo
             .get(user_id, conversation_id)
@@ -6512,3 +6530,6 @@ mod tests {
         assert!(!policy.sse);
     }
 }
+
+#[path = "service_workspace.rs"]
+mod workspace_switch;

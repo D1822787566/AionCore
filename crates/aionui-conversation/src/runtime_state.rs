@@ -16,6 +16,17 @@ pub struct ConversationRuntimeStateService {
     release_notify: Notify,
 }
 
+pub(crate) struct DirectoryChangeGuard {
+    state: Arc<ConversationRuntimeStateService>,
+    id: String,
+}
+
+impl Drop for DirectoryChangeGuard {
+    fn drop(&mut self) {
+        self.state.clear_restarting(&self.id);
+    }
+}
+
 #[derive(Debug, Default)]
 struct ConversationRuntimeState {
     active_turns: HashMap<String, String>,
@@ -62,6 +73,31 @@ pub enum RuntimeLifecycleState {
 }
 
 impl ConversationRuntimeStateService {
+    /// Exclude new turns and other directory changes without cancelling an active turn.
+    pub(crate) fn begin_directory_change(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<DirectoryChangeGuard, ConversationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ConversationError::internal("runtime state lock poisoned"))?;
+        if state.shutting_down
+            || state.active_turns.contains_key(id)
+            || state.deleting_conversations.contains(id)
+            || state.cancelling_conversations.contains(id)
+            || state.restarting_conversations.contains(id)
+        {
+            return Err(ConversationError::Busy {
+                reason: "WORKSPACE_SWITCH_BUSY: finish the current task before changing its directory".into(),
+            });
+        }
+        state.restarting_conversations.insert(id.to_owned());
+        Ok(DirectoryChangeGuard {
+            state: self.clone(),
+            id: id.to_owned(),
+        })
+    }
     pub fn try_claim_turn(
         self: &Arc<Self>,
         conversation_id: &str,
@@ -650,6 +686,30 @@ mod tests {
 
         assert!(!claim.release_for_turn("turn-a"));
         assert!(!state.is_claimed("conv-1"));
+    }
+
+    #[test]
+    fn directory_change_is_rejected_while_turn_is_active() {
+        let state = Arc::new(ConversationRuntimeStateService::default());
+        let _claim = state
+            .try_claim_turn("conv-1", "turn-a")
+            .expect("claim should be created");
+        let error = match state.begin_directory_change("conv-1") {
+            Ok(_) => panic!("active turns cannot switch workspace"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ConversationError::Busy { reason } if reason.starts_with("WORKSPACE_SWITCH_BUSY")));
+    }
+
+    #[test]
+    fn directory_change_guard_blocks_new_turns_until_released() {
+        let state = Arc::new(ConversationRuntimeStateService::default());
+        let guard = state
+            .begin_directory_change("conv-1")
+            .expect("idle conversation can switch workspace");
+        assert!(state.try_claim_turn("conv-1", "turn-a").is_err());
+        drop(guard);
+        assert!(state.try_claim_turn("conv-1", "turn-a").is_ok());
     }
 
     #[test]
