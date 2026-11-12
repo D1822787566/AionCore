@@ -224,7 +224,9 @@ impl AionrsAgentManager {
         let is_resume = resume_session.is_some();
         let provider_label = config.provider_label.clone();
 
-        let mut bootstrap = AgentBootstrap::new(config, &workspace, sink).runtime_env(runtime_env);
+        let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
+            .runtime_env(runtime_env)
+            .operation_contract(aionui_api_types::aion_operation_contract());
         if let Some(source) = config_extra.host_skills {
             bootstrap = bootstrap.host_skills(source);
         }

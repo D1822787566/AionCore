@@ -16,7 +16,7 @@ use crate::cli::{
     ConfigProvidersCommand, ConfigSettingsArgs, ConfigSettingsClientCommand, ConfigSettingsCommand, ConfigSkillsArgs,
     ConfigSkillsCommand, ConfigSkillsExternalPathsCommand, ConfigSkillsMarketCommand,
 };
-use crate::commands::config_capabilities;
+use crate::commands::{config_capabilities, operation_execution};
 
 const ENV_BASE_URL: &str = "AIONUI_BASE_URL";
 const ENV_CONVERSATION_ID: &str = "AIONUI_CONVERSATION_ID";
@@ -24,14 +24,21 @@ const ENV_USER_ID: &str = "AIONUI_USER_ID";
 const ENV_RUNTIME_TOKEN: &str = "AIONUI_RUNTIME_TOKEN";
 
 pub async fn run_config(args: ConfigArgs) -> ExitCode {
-    match run(args).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            error.log_failure();
-            eprintln!("{}", error.stderr_line());
-            error.exit_code()
+    operation_execution::TRACE.scope(std::cell::RefCell::new(Default::default()), async {
+        match run(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                error.log_failure();
+                eprintln!("{}", error.stderr_line());
+                let _ = writeln!(io::stdout().lock(), "{}", json!({
+                    "success":false,"data":null,
+                    "error":{"code":error.code.as_str(),"message":error.message,"details":error.details.as_deref().cloned().unwrap_or_else(||json!(error.fields))},
+                    "execution":operation_execution::failure(),
+                }));
+                error.exit_code()
+            }
         }
-    }
+    }).await
 }
 
 async fn run(args: ConfigArgs) -> Result<(), ConfigError> {
@@ -1561,6 +1568,7 @@ async fn request_json(
         request = request.json(&body);
     }
 
+    operation_execution::request_started();
     let response = request.send().await.map_err(|_| {
         tracing::warn!(
             command,
@@ -1598,6 +1606,9 @@ async fn request_json(
     }
 
     if text.trim().is_empty() {
+        if method_label != "GET" && !path.ends_with("/read") {
+            operation_execution::write_succeeded();
+        }
         return Ok(Value::Null);
     }
 
@@ -1633,7 +1644,11 @@ async fn request_json(
             "config CLI backend write/probe succeeded"
         );
     }
-    extract_api_data(value, command)
+    let data = extract_api_data(value, command)?;
+    if method_label != "GET" && !path.ends_with("/read") {
+        operation_execution::write_succeeded();
+    }
+    Ok(data)
 }
 
 fn config_http_status_error(command: &str, path: &str, status: u16, text: &str) -> ConfigError {
@@ -1689,19 +1704,52 @@ fn read_stdin_payload(command: &str) -> Result<Value, ConfigError> {
         )
         .field("field", "stdin"));
     }
-    serde_json::from_str(&raw).map_err(|_| {
+    let payload: Value = serde_json::from_str(&raw).map_err(|_| {
         ConfigError::new(
             ConfigErrorCode::PayloadInvalid,
             command,
             "invalid JSON payload on stdin",
         )
         .field("field", "stdin")
-    })
+    })?;
+    let catalog = aionui_api_types::aion_operation_contract();
+    let descriptor = catalog["operations"]
+        .as_array()
+        .and_then(|items| items.iter().find(|d| d["operation"] == command.replace(' ', ".")))
+        .ok_or_else(|| {
+            ConfigError::new(
+                ConfigErrorCode::ContractInvalid,
+                command,
+                "operation input contract is unavailable",
+            )
+        })?;
+    aion_tools::validation::check_tool_schema(&descriptor["input_schema"]).map_err(|_| {
+        ConfigError::new(
+            ConfigErrorCode::ContractInvalid,
+            command,
+            "operation input contract uses unsupported rules",
+        )
+    })?;
+    if let Err(errors) = aion_tools::validation::validate_tool_input(&descriptor["input_schema"], &payload) {
+        let first = &errors[0];
+        let mut error = ConfigError::new(
+            ConfigErrorCode::PayloadInvalid,
+            command,
+            "JSON payload does not match the operation contract",
+        )
+        .field("field", first.path.trim_start_matches('/'));
+        error.details = Some(Box::new(
+            json!({"errors":errors.iter().map(|e|json!({"path":e.path,"expected":e.expected,"actual":e.actual,"message":e.message})).collect::<Vec<_>>() }),
+        ));
+        return Err(error);
+    }
+    Ok(payload)
 }
 
 fn print_envelope(data: Value, meta: Value, command: &str) -> Result<(), ConfigError> {
     let rendered = serde_json::to_string_pretty(&json!({
         "success": true,
+        "execution":{"status":"succeeded","stage":"completed"},
         "data": data,
         "meta": meta,
     }))
@@ -1734,7 +1782,12 @@ fn required_string_field(payload: &Value, field: &'static str, command: &str) ->
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| {
-            ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "missing required field").field("field", field)
+            let message = match payload.get(field) {
+                None => "missing required field",
+                Some(Value::String(_)) => "required field must not be blank",
+                Some(_) => "required field must be a string",
+            };
+            ConfigError::new(ConfigErrorCode::PayloadInvalid, command, message).field("field", field)
         })
 }
 
@@ -1748,6 +1801,7 @@ fn optional_string_field(payload: &Value, field: &'static str) -> Option<String>
 }
 
 fn take_required_string_field(payload: &mut Value, field: &'static str, command: &str) -> Result<String, ConfigError> {
+    let value = required_string_field(payload, field, command)?;
     let object = payload.as_object_mut().ok_or_else(|| {
         ConfigError::new(
             ConfigErrorCode::PayloadInvalid,
@@ -1756,14 +1810,8 @@ fn take_required_string_field(payload: &mut Value, field: &'static str, command:
         )
         .field("field", "stdin")
     })?;
-    object
-        .remove(field)
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "missing required field").field("field", field)
-        })
+    object.remove(field);
+    Ok(value)
 }
 
 fn take_optional_string_field(payload: &mut Value, field: &'static str) -> Option<String> {
@@ -1870,6 +1918,7 @@ fn percent_encode(input: &str, encode_space_as_plus: bool) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigErrorCode {
+    ContractInvalid,
     EnvMissing,
     ContextAssistantMissing,
     PayloadMissing,
@@ -1884,6 +1933,7 @@ enum ConfigErrorCode {
 impl ConfigErrorCode {
     fn as_str(self) -> &'static str {
         match self {
+            Self::ContractInvalid => "CONFIG_CONTRACT_INVALID",
             Self::EnvMissing => "CONFIG_ENV_MISSING",
             Self::ContextAssistantMissing => "CONFIG_CONTEXT_ASSISTANT_MISSING",
             Self::PayloadMissing => "CONFIG_PAYLOAD_MISSING",
@@ -1902,7 +1952,9 @@ impl ConfigErrorCode {
                 ExitCode::from(2)
             }
             Self::HttpRequestFailed | Self::HttpStatusError => ExitCode::from(3),
-            Self::ResponseReadFailed | Self::ResponseJsonInvalid | Self::StdoutWriteFailed => ExitCode::from(1),
+            Self::ContractInvalid | Self::ResponseReadFailed | Self::ResponseJsonInvalid | Self::StdoutWriteFailed => {
+                ExitCode::from(1)
+            }
         }
     }
 }
@@ -1913,6 +1965,7 @@ struct ConfigError {
     command: String,
     message: &'static str,
     fields: BTreeMap<&'static str, String>,
+    details: Option<Box<Value>>,
 }
 
 impl ConfigError {
@@ -1922,6 +1975,7 @@ impl ConfigError {
             command: command.to_owned(),
             message,
             fields: BTreeMap::new(),
+            details: None,
         }
     }
 
@@ -1949,9 +2003,12 @@ impl ConfigError {
     }
 
     fn log_failure(&self) {
+        let execution = operation_execution::failure();
         tracing::warn!(
             code = self.code.as_str(),
             command = self.command.as_str(),
+            stage = execution["stage"].as_str().unwrap_or("unknown"),
+            execution_status = execution["status"].as_str().unwrap_or("unknown"),
             "config CLI command failed"
         );
     }

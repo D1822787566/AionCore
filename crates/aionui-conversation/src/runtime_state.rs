@@ -23,7 +23,9 @@ pub(crate) struct DirectoryChangeGuard {
 
 impl Drop for DirectoryChangeGuard {
     fn drop(&mut self) {
-        self.state.clear_restarting(&self.id);
+        if let Ok(mut state) = self.state.state.lock() {
+            state.directory_changes.remove(&self.id);
+        }
     }
 }
 
@@ -33,6 +35,7 @@ struct ConversationRuntimeState {
     deleting_conversations: HashSet<String>,
     cancelling_conversations: HashSet<String>,
     restarting_conversations: HashSet<String>,
+    directory_changes: HashSet<String>,
     /// Cancels that arrived before the turn's agent registered, keyed by
     /// conversation and holding the turn they were meant for.
     deferred_cancels: HashMap<String, String>,
@@ -73,7 +76,7 @@ pub enum RuntimeLifecycleState {
 }
 
 impl ConversationRuntimeStateService {
-    /// Exclude new turns and other directory changes without cancelling an active turn.
+    /// Serialize saved-directory changes with new turn claims, preserving active turns.
     pub(crate) fn begin_directory_change(
         self: &Arc<Self>,
         id: &str,
@@ -83,16 +86,16 @@ impl ConversationRuntimeStateService {
             .lock()
             .map_err(|_| ConversationError::internal("runtime state lock poisoned"))?;
         if state.shutting_down
-            || state.active_turns.contains_key(id)
             || state.deleting_conversations.contains(id)
             || state.cancelling_conversations.contains(id)
             || state.restarting_conversations.contains(id)
+            || state.directory_changes.contains(id)
         {
             return Err(ConversationError::Busy {
                 reason: "WORKSPACE_SWITCH_BUSY: finish the current task before changing its directory".into(),
             });
         }
-        state.restarting_conversations.insert(id.to_owned());
+        state.directory_changes.insert(id.to_owned());
         Ok(DirectoryChangeGuard {
             state: self.clone(),
             id: id.to_owned(),
@@ -138,6 +141,12 @@ impl ConversationRuntimeStateService {
             );
             return Err(ConversationError::RuntimeRestarting {
                 conversation_id: conversation_id.to_owned(),
+            });
+        }
+
+        if state.directory_changes.contains(conversation_id) {
+            return Err(ConversationError::Busy {
+                reason: "WORKSPACE_SWITCH_IN_PROGRESS: project directory is being saved".into(),
             });
         }
 
@@ -353,7 +362,9 @@ impl ConversationRuntimeStateService {
                 reason: format!("conversation {conversation_id} is being deleted"),
             });
         }
-        if !state.restarting_conversations.insert(conversation_id.to_owned()) {
+        if state.directory_changes.contains(conversation_id)
+            || !state.restarting_conversations.insert(conversation_id.to_owned())
+        {
             // Same condition the turn/config gates report, so it carries the same
             // code: a caller retrying on `runtime_restarting` needs one rule, not
             // one per entry point.
@@ -667,6 +678,13 @@ mod tests {
             .expect("claim should be created");
 
         assert_eq!(state.active_turn_id_for("conv-1").as_deref(), Some("turn-a"));
+        assert!(!state.is_restarting("conv-1"));
+        assert_eq!(
+            state
+                .summary_from_parts("conv-1", Some(ConversationStatus::Running), true, 0, false)
+                .state,
+            ConversationRuntimeStateKind::Running
+        );
 
         let summary = state.summary_from_parts("conv-1", None, false, 0, false);
         assert_eq!(summary.turn_id.as_deref(), Some("turn-a"));
@@ -689,16 +707,18 @@ mod tests {
     }
 
     #[test]
-    fn directory_change_is_rejected_while_turn_is_active() {
+    fn directory_change_preserves_the_active_turn_and_blocks_new_claims() {
         let state = Arc::new(ConversationRuntimeStateService::default());
         let _claim = state
             .try_claim_turn("conv-1", "turn-a")
             .expect("claim should be created");
-        let error = match state.begin_directory_change("conv-1") {
-            Ok(_) => panic!("active turns cannot switch workspace"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, ConversationError::Busy { reason } if reason.starts_with("WORKSPACE_SWITCH_BUSY")));
+        let guard = state
+            .begin_directory_change("conv-1")
+            .expect("active turn can move projects");
+        assert_eq!(state.active_turn_id_for("conv-1").as_deref(), Some("turn-a"));
+        assert!(state.try_claim_turn("conv-1", "turn-b").is_err());
+        drop(guard);
+        assert_eq!(state.active_turn_id_for("conv-1").as_deref(), Some("turn-a"));
     }
 
     #[test]

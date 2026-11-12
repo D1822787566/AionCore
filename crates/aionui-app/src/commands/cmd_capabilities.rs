@@ -25,6 +25,7 @@ pub(crate) fn run_capabilities() -> ExitCode {
 fn data() -> Value {
     json!({
         "schema_version": 1,
+        "operation_contract": aionui_api_types::aion_operation_contract(),
         "contract": "agent-facing-aioncore-cli",
         "stability": "stable",
         "entrypoint": "aioncore capabilities",

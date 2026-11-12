@@ -257,3 +257,8 @@ mod public_contract_tests {
         assert_eq!(resolution.target, Some(AgentErrorResolutionTarget::Feedback));
     }
 }
+mod config_operation_inputs;
+mod config_operations;
+mod operation_contract;
+pub use config_operations::config_operation_capabilities;
+pub use operation_contract::{AION_OPERATION_CONTRACT_VERSION, aion_operation_contract};

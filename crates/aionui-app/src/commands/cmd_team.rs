@@ -154,48 +154,11 @@ fn read_stdin_json_object(command: &str, tool: TeamToolName) -> Result<Value, Ex
 }
 
 fn validate_against_descriptor(command: &str, tool: TeamToolName, value: Value) -> Result<Value, ExitCode> {
-    let Some(object) = value.as_object() else {
-        return Err(print_failure(
-            command,
-            "TEAM_CLI_SCHEMA_VALIDATION_FAILED",
-            TeamToolErrorPayload::new(
-                TeamToolErrorCode::SchemaValidationFailed,
-                "stdin JSON must be an object",
-            ),
-        ));
-    };
     let descriptor = aionui_api_types::team_tool_descriptor(tool.as_str()).expect("descriptor for canonical tool");
-    let properties = descriptor.input_schema["properties"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    for key in object.keys() {
-        if !properties.contains_key(key) {
-            return Err(print_failure(
-                command,
-                "TEAM_CLI_SCHEMA_VALIDATION_FAILED",
-                TeamToolErrorPayload::new(
-                    TeamToolErrorCode::SchemaValidationFailed,
-                    format!("unknown stdin field: {key}"),
-                )
-                .with_details(json!({ "expected_schema": descriptor.input_schema })),
-            ));
-        }
-    }
-    if let Some(required) = descriptor.input_schema["required"].as_array() {
-        for key in required.iter().filter_map(Value::as_str) {
-            if !object.contains_key(key) {
-                return Err(print_failure(
-                    command,
-                    "TEAM_CLI_SCHEMA_VALIDATION_FAILED",
-                    TeamToolErrorPayload::new(
-                        TeamToolErrorCode::SchemaValidationFailed,
-                        format!("missing required stdin field: {key}"),
-                    )
-                    .with_details(json!({ "expected_schema": descriptor.input_schema })),
-                ));
-            }
-        }
+    if let Err(errors) = aion_tools::validation::validate_tool_input(&descriptor.input_schema, &value) {
+        return Err(print_failure(command,"TEAM_CLI_SCHEMA_VALIDATION_FAILED",
+            TeamToolErrorPayload::new(TeamToolErrorCode::SchemaValidationFailed,"stdin JSON does not match the operation contract")
+            .with_details(json!({"expected_schema":descriptor.input_schema,"errors":errors.iter().map(|e|json!({"path":e.path,"expected":e.expected,"actual":e.actual,"message":e.message})).collect::<Vec<_>>()}))));
     }
     Ok(value)
 }
@@ -206,6 +169,14 @@ async fn print_response(response: reqwest::Response) -> Result<(), ExitCode> {
         .text()
         .await
         .map_err(|error| runtime_error("team", "TEAM_CLI_HTTP_RESPONSE_FAILED", error.to_string()))?;
+    if serde_json::from_str::<Value>(&text).is_err() {
+        let exit = runtime_error(
+            "team",
+            "TEAM_CLI_HTTP_RESPONSE_INVALID",
+            "AionUi backend returned invalid JSON".into(),
+        );
+        return Err(if status.is_success() { exit } else { ExitCode::from(3) });
+    }
     if !status.is_success() {
         eprintln!(
             "TEAM_CLI_HTTP_STATUS_ERROR command=team status={status}: runtime bridge returned non-success status"
@@ -245,7 +216,10 @@ fn unknown_command(prefix: &str, path: Vec<OsString>, message: &'static str) -> 
 
 fn print_failure(command: &str, stderr_code: &'static str, error: TeamToolErrorPayload) -> ExitCode {
     eprintln!("{stderr_code} command={command}: {}", error.message);
-    let _ = print_json(&TeamToolCliEnvelope::<Value>::failure(error, Some(command.to_owned())));
+    let _ = print_json(&super::operation_execution::local_failure(
+        TeamToolCliEnvelope::<Value>::failure(error, Some(command.to_owned())),
+        stderr_code,
+    ));
     ExitCode::from(2)
 }
 

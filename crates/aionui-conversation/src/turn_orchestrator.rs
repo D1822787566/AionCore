@@ -106,8 +106,8 @@ impl ConversationTurnOrchestrator {
         );
 
         let agent = match self
-            .task_manager
-            .get_or_build_task(&input.conv_id, input.build_options)
+            .service
+            .build_turn_runtime(&input.conv_id, input.build_options, &self.task_manager)
             .await
         {
             Ok(agent) => agent,

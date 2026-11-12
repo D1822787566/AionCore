@@ -180,6 +180,16 @@ fn read_stdin_json_object(command: &str) -> Result<Value, ExitCode> {
 
 fn required_string_field(command: &str, field: &'static str) -> Result<String, ExitCode> {
     let value = read_stdin_json_object(command)?;
+    let catalog = aionui_api_types::aion_operation_contract();
+    let descriptor = catalog["operations"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|d| d["operation"] == command.replace(' ', ".")))
+        .expect("runtime skills contract");
+    if let Err(errors) = aion_tools::validation::validate_tool_input(&descriptor["input_schema"], &value) {
+        return Err(print_failure(command,"SKILLS_CLI_SCHEMA_VALIDATION_FAILED",
+            SkillRuntimeErrorPayload::new(SkillRuntimeErrorCode::SchemaValidationFailed,"stdin JSON does not match the operation contract")
+            .with_details(json!({"errors":errors.iter().map(|e|json!({"path":e.path,"expected":e.expected,"actual":e.actual,"message":e.message})).collect::<Vec<_>>()}))));
+    }
     value
         .get(field)
         .and_then(Value::as_str)
@@ -217,6 +227,14 @@ async fn print_response(command: &str, response: reqwest::Response) -> Result<()
         .text()
         .await
         .map_err(|error| runtime_error(command, "SKILLS_CLI_HTTP_RESPONSE_FAILED", error.to_string()))?;
+    if serde_json::from_str::<Value>(&text).is_err() {
+        let exit = runtime_error(
+            command,
+            "SKILLS_CLI_HTTP_RESPONSE_INVALID",
+            "AionUi backend returned invalid JSON".into(),
+        );
+        return Err(if status.is_success() { exit } else { ExitCode::from(3) });
+    }
     if !status.is_success() {
         eprintln!(
             "SKILLS_CLI_HTTP_STATUS_ERROR command={command} status={status}: runtime bridge returned non-success status"
@@ -261,7 +279,10 @@ fn unknown_command(path: Vec<OsString>) -> ExitCode {
 
 fn print_failure(command: &str, stderr_code: &'static str, error: SkillRuntimeErrorPayload) -> ExitCode {
     eprintln!("{stderr_code} command={command}: {}", error.message);
-    let _ = print_json(&SkillRuntimeEnvelope::<Value>::failure(error, Some(command.to_owned())));
+    let _ = print_json(&super::operation_execution::local_failure(
+        SkillRuntimeEnvelope::<Value>::failure(error, Some(command.to_owned())),
+        stderr_code,
+    ));
     ExitCode::from(2)
 }
 

@@ -41,6 +41,8 @@ pub enum SkillRuntimeErrorCode {
 pub struct SkillRuntimeErrorPayload {
     pub code: SkillRuntimeErrorCode,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl SkillRuntimeErrorPayload {
@@ -48,7 +50,13 @@ impl SkillRuntimeErrorPayload {
         Self {
             code,
             message: message.into(),
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 

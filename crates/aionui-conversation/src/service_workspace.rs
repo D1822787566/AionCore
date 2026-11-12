@@ -2,13 +2,13 @@ use super::*;
 use aionui_api_types::SwitchConversationWorkspaceRequest;
 
 impl ConversationService {
-    /// Switch an idle standalone aionrs conversation without moving any files or messages.
+    /// Save the directory for future turns without interrupting the active runtime.
     pub async fn switch_workspace(
         &self,
         user_id: &str,
         id: &str,
         req: SwitchConversationWorkspaceRequest,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        _task_manager: &Arc<dyn IWorkerTaskManager>,
     ) -> Result<ConversationResponse, ConversationError> {
         let _guard = self.runtime_state.begin_directory_change(id)?;
         let row = self
@@ -37,13 +37,6 @@ impl ConversationService {
             return Err(ConversationError::bad_request(
                 "WORKSPACE_SWITCH_INVALID: choose exactly one project, directory, or restore-default action",
             ));
-        }
-        if task_manager.get_task(id).is_some_and(|task| {
-            task.status().is_some_and(|s| s != ConversationStatus::Finished) || task.live_background_tasks() > 0
-        }) {
-            return Err(ConversationError::Busy {
-                reason: "WORKSPACE_SWITCH_BUSY: finish the current task before changing its directory".into(),
-            });
         }
         let project = self
             .project_service
@@ -101,10 +94,8 @@ impl ConversationService {
                     .map_err(|_| ConversationError::bad_request("WORKSPACE_SWITCH_DIRECTORY_UNAVAILABLE"))?,
             )
         };
-        // Stop the old runtime before committing a new directory. No message/history reset.
-        task_manager
-            .kill_and_wait(id, Some(AgentKillReason::RuntimeRestart))
-            .await;
+        // Existing turns retain their runtime and cwd. The next turn reconciles
+        // its build options with the cached runtime before sending any prompt.
         extra["workspace"] = target.into();
         extra["using_default_workspace"] = req.restore_default.into();
         let updates = ConversationRowUpdate {
@@ -116,17 +107,17 @@ impl ConversationService {
             ..Default::default()
         };
         self.conversation_repo.update(user_id, id, &updates).await?;
-        // Runtime creation remains lazy; the send path builds from the new persisted cwd.
-        // On a DB failure the previous directory is still authoritative and can rebuild.
         let updated = self
             .conversation_repo
             .get(user_id, id)
             .await?
             .ok_or_else(|| ConversationError::NotFound { id: id.into() })?;
+        drop(_guard);
         info!(
             conversation_id = id,
             restored_default = req.restore_default,
-            "Conversation directory switched; old runtime released"
+            active_turn = self.runtime_state.is_claimed(id),
+            "Conversation directory saved for future turns; active runtime preserved"
         );
         self.broadcast_list_changed(
             user_id,
@@ -134,6 +125,41 @@ impl ConversationService {
             "updated",
             row_to_response(updated.clone(), &self.workspace_root)?.source.as_ref(),
         );
-        row_to_response(updated, &self.workspace_root)
+        let mut response = row_to_response(updated, &self.workspace_root)?;
+        response.runtime = Some(self.runtime_summary_for(id).await);
+        Ok(response)
+    }
+
+    /// Reconcile cwd only at a turn boundary, never from warmup/config reads.
+    pub(crate) async fn build_turn_runtime(
+        &self,
+        id: &str,
+        options: BuildTaskOptions,
+        task_manager: &Arc<dyn IWorkerTaskManager>,
+    ) -> Result<AgentInstance, AgentError> {
+        let agent = task_manager.get_or_build_task(id, options.clone()).await?;
+        if agent.agent_type() != AgentType::Aionrs
+            || options.context.conversation.agent_type != AgentType::Aionrs
+            || options.context.team.is_some()
+            || options.context.workspace.stored_path.is_empty()
+            || agent.workspace() == options.context.workspace.path
+        {
+            return Ok(agent);
+        }
+        // A background task may outlive the foreground turn. Preserve it too;
+        // a new turn can be retried once those tasks finish.
+        if agent.live_background_tasks() > 0 {
+            return Err(AgentError::bad_request(
+                "WORKSPACE_SWITCH_BACKGROUND_ACTIVE: previous-directory background tasks are still running; retry after they finish",
+            ));
+        }
+        info!(
+            conversation_id = id,
+            "Rebuilding idle runtime for the next turn's saved directory"
+        );
+        task_manager
+            .kill_and_wait(id, Some(AgentKillReason::RuntimeRestart))
+            .await;
+        task_manager.get_or_build_task(id, options).await
     }
 }

@@ -37,6 +37,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+aion-tools = { path = "../aionrs/crates/aion-tools" }
 # Internal crates
 aionui-common = { path = "crates/aionui-common" }
 aionui-assets = { path = "crates/aionui-assets" }

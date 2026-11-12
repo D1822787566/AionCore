@@ -658,6 +658,7 @@ async fn config_payload_commands_resolve_current_conversation_and_user_selectors
   "conversation_id": "current",
   "user_id": "current",
   "created_by": "user",
+  "schedule": {"kind":"every","every_ms":60000},
   "message": "Run selector task"
 }"#,
         )
@@ -766,7 +767,7 @@ async fn config_provider_create_redacts_api_key_from_stdout() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(br#"{ "name": "OpenAI", "api_key": "sk-input-secret" }"#)
+        .write_all(br#"{ "name": "OpenAI", "platform": "openai", "base_url": "http://fixture.invalid", "api_key": "sk-input-secret" }"#)
         .await
         .unwrap();
     drop(child.stdin.take());

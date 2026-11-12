@@ -4099,6 +4099,16 @@ impl ConversationService {
             (turn_id, turn_claim)
         };
 
+        // A directory move can finish between the first read and the turn claim.
+        // Snapshot its saved cwd only after claiming this new turn.
+        let row = self
+            .conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+
         // Store user message. `msg_id` is server-generated so the WebSocket
         // stream, DB row, and client-side message index all agree on the same
         // key. We reuse the same value for `id` (primary key) and `msg_id`
@@ -4237,6 +4247,13 @@ impl ConversationService {
 
         let turn_id = Self::mint_turn_id();
         let turn_claim = self.runtime_state.try_claim_turn(&request.conversation_id, &turn_id)?;
+        let row = self
+            .conversation_repo
+            .get(&request.user_id, &request.conversation_id)
+            .await?
+            .ok_or_else(|| ConversationError::NotFound {
+                id: request.conversation_id.clone(),
+            })?;
         if request.persist_user_message {
             let user_msg_id = Self::mint_msg_id();
             let user_msg = aionui_db::models::MessageRow {
@@ -5082,6 +5099,10 @@ impl ConversationService {
             return Ok(());
         }
 
+        let Ok(_directory_guard) = self.runtime_state.begin_directory_change(conversation_id) else {
+            return Ok(());
+        };
+
         // Fetch latest extra, merge the resolved workspace path in, and persist.
         let row = self
             .conversation_repo
@@ -5090,6 +5111,11 @@ impl ConversationService {
             .ok_or_else(|| ConversationError::internal("Conversation vanished during workspace sync"))?;
 
         let mut extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_else(|_| serde_json::json!({}));
+        // A turn being built may still resolve its original cwd after the user
+        // selected a directory for future turns. Do not overwrite that selection.
+        if extra.get("workspace").and_then(|value| value.as_str()).unwrap_or("") != stored_workspace {
+            return Ok(());
+        }
         extra["workspace"] = serde_json::Value::String(resolved_workspace.to_owned());
 
         let extra_json = serde_json::to_string(&extra)

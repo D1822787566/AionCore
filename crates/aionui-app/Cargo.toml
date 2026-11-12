@@ -18,6 +18,7 @@ slack = ["aionui-channel/slack"]
 discord = ["aionui-channel/discord"]
 
 [dependencies]
+aion-tools.workspace = true
 aionui-common.workspace = true
 aionui-assets.workspace = true
 aionui-db.workspace = true
@@ -77,6 +78,10 @@ windows-sys = { version = "0.61", features = [
 libc.workspace = true
 
 [dev-dependencies]
+aion-types = { path = "../../../aionrs/crates/aion-types" }
+aion-agent = { path = "../../../aionrs/crates/aion-agent" }
+aion-providers = { path = "../../../aionrs/crates/aion-providers" }
+aion-protocol = { path = "../../../aionrs/crates/aion-protocol" }
 aionui-api-types.workspace = true
 aionui-realtime.workspace = true
 # Enable the `AgentInstance::Mock` variant so tests can build fake agents

@@ -3,6 +3,20 @@ use aionui_api_types::{AgentErrorCode, AgentErrorOwnership};
 use super::*;
 
 #[test]
+fn output_budget_failure_is_not_a_provider_error_or_automatically_retryable() {
+    let error = AionrsAgentError::ToolOutputBudget {
+        tool: "AionOperation".into(),
+        minimum: 512,
+        actual: 1,
+    };
+    let send_error = aionrs_engine_error_to_send_error(&error);
+    assert_eq!(send_error.code(), Some(AgentErrorCode::AionuiInternalError));
+    assert_eq!(send_error.ownership(), Some(AgentErrorOwnership::Aionui));
+    assert_eq!(send_error.stream_error().retryable, Some(false));
+    assert_eq!(aionrs_runtime_error_summary(&error).kind, "tool_output_budget");
+}
+
+#[test]
 fn aionrs_structured_malformed_tool_call_error_is_provider_error() {
     let error = AionrsAgentError::ToolCallMalformed { count: 3, limit: 3 };
     let send_error = aionrs_engine_error_to_send_error(&error);

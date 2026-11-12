@@ -19,6 +19,18 @@ pub(super) fn aionrs_engine_error_to_send_error(error: &AionrsAgentError) -> Age
             Some(AgentErrorResolutionTarget::ProviderSettings),
         ),
         AionrsAgentError::ToolCallFailures { .. } => tool_call_failure_send_error(detail),
+        AionrsAgentError::ToolOutputBudget { .. } => AgentSendError::new(
+            "The configured tool output budget is too small; no tool in this batch was executed",
+            AgentErrorCode::AionuiInternalError,
+            AgentErrorOwnership::Aionui,
+            Some(detail),
+            false,
+            true,
+            Some(AgentErrorResolution::new(
+                AgentErrorResolutionKind::SendFeedback,
+                Some(AgentErrorResolutionTarget::Feedback),
+            )),
+        ),
         AionrsAgentError::ContextTooLong { .. } => provider_send_error(
             "The request is too large for the configured model context window",
             AgentErrorCode::UserLlmProviderContextTooLarge,
@@ -90,6 +102,7 @@ pub(super) fn aionrs_runtime_error_summary(error: &AionrsAgentError) -> AionrsRu
             AionrsRuntimeErrorSummary::new("context_too_large", Some("context_too_large"))
         }
         AionrsAgentError::ApiError(_) => AionrsRuntimeErrorSummary::new("api_error", None),
+        AionrsAgentError::ToolOutputBudget { .. } => AionrsRuntimeErrorSummary::new("tool_output_budget", None),
         AionrsAgentError::UserAborted => AionrsRuntimeErrorSummary::new("user_aborted", None),
     }
 }
