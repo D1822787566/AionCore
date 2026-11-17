@@ -259,6 +259,7 @@ mod public_contract_tests {
 }
 mod config_operation_inputs;
 mod config_operations;
+mod file_operations;
 mod operation_contract;
 pub use config_operations::config_operation_capabilities;
 pub use operation_contract::{AION_OPERATION_CONTRACT_VERSION, aion_operation_contract};

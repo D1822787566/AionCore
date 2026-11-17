@@ -1,6 +1,6 @@
 ---
 name: officecli
-description: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx) with the officecli CLI. Use when the user wants to build, inspect, check formatting, or chart a Word/Excel/PPT file.
+description: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx), and use AionUi built-in file operations for legacy .xls. Use when the user wants to read or edit an Office attachment or local file.
 ---
 
 > **⚠️ Platform note — read before running any command.** The shell snippets in this skill are written for **macOS / Linux** (bash/zsh). Always check which OS you are on first. On **Windows** do **not** run them verbatim — the underlying tool/CLI commands are usually cross-platform, but the surrounding shell syntax is not. Translate it to PowerShell before running:
@@ -23,7 +23,48 @@ description: Create, analyze, proofread, and modify Office documents (.docx, .xl
 
 AI-friendly CLI for .docx, .xlsx, .pptx. Single binary, no dependencies, no Office installation needed.
 
+## Existing local files and attachments in AionUi
+
+For an existing `.xlsx`, `.docx`, `.pptx` or `.xls` that needs preparation/editing,
+use the built-in `AionOperation` lifecycle. Call `operation.describe` for exact fields.
+The host supplies the conversation identity and frozen task directory.
+
+1. `file.prepare` with the original absolute `source_path`. Keep the returned
+   `processing_id`, `working_path` and `working_sha256`. Check the actual prepare/open
+   result. `intranet_trigger: pending_verification` is not proof of e-safenet decryption.
+2. For `.xls`, use `file.inspect` with a sheet and A1 range, then `file.xls.write`
+   with the current `expected_sha256` and explicitly typed changes. Supported types:
+   string, number, boolean, date, blank, formula. Formula omits the leading `=`;
+   blank omits value; date requires an existing date format. Split reads/writes
+   into at most 10000 cells. Do not convert XLS to XLSX or use OfficeCLI for XLS.
+3. For modern formats, use OfficeCLI through `ExecCommand` on `working_path`.
+   Read structure first, edit, then `officecli close` to save and release the resident.
+   Run `officecli get WORKING_PATH SELECTOR --json` to check the requested edits.
+   Call `file.inspect` to obtain the current hash.
+4. `file.finish` takes the current hash and an output filename with the same format.
+   For modern formats, include `checks`: a list of `selector` and nonempty `expected`
+   JSON objects copied from the relevant fields in the actual `officecli get --json`
+   output. The tool independently reopens and compares these JSON subsets on the
+   working file and final file. Never invent the output shape; inspect it first.
+5. Return the actual final path and independent delivery/cleanup status. Cleanup
+   happens only after final readback succeeds. Do not call the old MCP `read_auto`
+   on these working files or delete them yourself.
+
+If recalculation failed, retain formulas and the working file, explain that caches
+may be incomplete, and ask the user whether this particular file is acceptable.
+Only after that choice may `file.finish` use `accept_uncalculated: true`.
+Invalid content or a readback mismatch is never waived by this flag.
+After a timeout or lost reply, inspect first; do not replay writes. A verified final
+file with failed cleanup remains deliverable; repeating finish retries cleanup
+without creating another final file. Complex-object diagnostics may permit reading
+while blocking edits. `.doc` and `.ppt` editing is deferred; existing readers keep
+their original environment requirements.
+
 ## Install
+
+In AionUi, a managed OfficeCLI or HSSF bundle is supplied by the application.
+If that managed bundle is missing or damaged, report the resource diagnostic;
+do not run an online installer or switch to a system Java to bypass it.
 
 If `officecli` is not installed:
 

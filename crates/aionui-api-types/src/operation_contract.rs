@@ -72,10 +72,11 @@ pub fn aion_operation_contract() -> Value {
             json!({"type":"object","required":[field],"properties":{field:{"type":"string","minLength":1}}}),
         ));
     }
+    operations.extend(crate::file_operations::file_operation_entries());
     json!({"contract_version":AION_OPERATION_CONTRACT_VERSION,"operations":operations})
 }
 
-fn entry(name: &str, description: &str, schema: Value) -> Value {
+pub(super) fn entry(name: &str, description: &str, schema: Value) -> Value {
     json!({"operation":name,"contract_version":AION_OPERATION_CONTRACT_VERSION,"description":description,"examples":[example_input(&schema)],"input_schema":schema,"selectors":[],"requires_confirmation":requires_confirmation(name)})
 }
 
@@ -83,6 +84,8 @@ fn requires_confirmation(name: &str) -> bool {
     matches!(
         name.rsplit('.').next().unwrap_or(name),
         "create"
+            | "prepare"
+            | "finish"
             | "update"
             | "delete"
             | "import"

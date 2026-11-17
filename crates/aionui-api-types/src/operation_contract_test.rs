@@ -15,7 +15,7 @@ fn catalog_has_unique_explicit_input_contracts() {
         assert!(entry["input_schema"].is_object());
         assert!(entry["examples"].is_array());
     }
-    assert_eq!(names.len(), 98);
+    assert_eq!(names.len(), 102);
     let mcp = entries
         .iter()
         .find(|d| d["operation"] == "config.mcp.servers.get")

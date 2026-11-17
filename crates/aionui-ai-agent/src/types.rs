@@ -70,6 +70,7 @@ impl BuildTaskOptions {
                     | AIONUI_HELPER_BIN_ENV
                     | AIONUI_BASE_URL_ENV
                     | AIONUI_RUNTIME_TOKEN_ENV
+                    | AIONUI_TASK_WORK_DIR_ENV
             )
         });
         self.context
@@ -78,6 +79,9 @@ impl BuildTaskOptions {
         self.context
             .runtime_env
             .push((AIONUI_CONVERSATION_ID_ENV.to_owned(), conversation_id.to_owned()));
+        self.context
+            .runtime_env
+            .push((AIONUI_TASK_WORK_DIR_ENV.to_owned(), self.context.workspace.path.clone()));
         if let Some(helper_bin) = helper_bin {
             self.context
                 .runtime_env
@@ -102,6 +106,7 @@ pub const AIONUI_CONVERSATION_ID_ENV: &str = "AIONUI_CONVERSATION_ID";
 pub const AIONUI_HELPER_BIN_ENV: &str = "AIONUI_HELPER_BIN";
 pub const AIONUI_BASE_URL_ENV: &str = "AIONUI_BASE_URL";
 pub const AIONUI_RUNTIME_TOKEN_ENV: &str = "AIONUI_RUNTIME_TOKEN";
+pub const AIONUI_TASK_WORK_DIR_ENV: &str = "AIONUI_TASK_WORK_DIR";
 pub const CONVERSATION_RUNTIME_CONTEXT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -230,6 +235,7 @@ mod tests {
                 (AIONUI_USER_ID_ENV.into(), "old-user".into()),
                 (AIONUI_CONVERSATION_ID_ENV.into(), "old-conv".into()),
                 (AIONUI_RUNTIME_TOKEN_ENV.into(), "old-token".into()),
+                (AIONUI_TASK_WORK_DIR_ENV.into(), "untrusted-old-directory".into()),
                 ("EXISTING".into(), "1".into()),
             ],
             team: None,
@@ -298,6 +304,19 @@ mod tests {
             1
         );
         assert!(options.context.runtime_env.contains(&("EXISTING".into(), "1".into())));
+        assert!(options.context.runtime_env.contains(&(
+            AIONUI_TASK_WORK_DIR_ENV.to_owned(),
+            options.context.workspace.path.clone()
+        )));
+        assert_eq!(
+            options
+                .context
+                .runtime_env
+                .iter()
+                .filter(|(key, _)| key == AIONUI_TASK_WORK_DIR_ENV)
+                .count(),
+            1
+        );
         assert_eq!(
             options.runtime_capabilities.conversation_runtime_context_version,
             Some(CONVERSATION_RUNTIME_CONTEXT_VERSION)

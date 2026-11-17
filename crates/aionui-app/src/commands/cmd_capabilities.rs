@@ -5,11 +5,12 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
-const RUNTIME_ENV: [&str; 4] = [
+const RUNTIME_ENV: [&str; 5] = [
     "AIONUI_HELPER_BIN",
     "AIONUI_BASE_URL",
     "AIONUI_CONVERSATION_ID",
     "AIONUI_USER_ID",
+    "AIONUI_TASK_WORK_DIR",
 ];
 
 pub(crate) fn run_capabilities() -> ExitCode {
@@ -152,6 +153,20 @@ fn data() -> Value {
                     "can_write": false,
                     "read_only": true,
                     "scoped_to_conversation_snapshot": true
+                }
+            },
+            {
+                "name": "file",
+                "mode": "local-file-processing",
+                "description": "Prepare full working files, inspect or edit XLS, verify final delivery and clean recorded temporary files.",
+                "contract": "aion-operation-contract",
+                "invocation": "aioncore file <prepare|inspect|xls write|finish>",
+                "runtime_required": ["AIONUI_USER_ID", "AIONUI_CONVERSATION_ID", "AIONUI_TASK_WORK_DIR"],
+                "safety": {
+                    "can_write": true,
+                    "preserves_original": true,
+                    "uses_frozen_task_directory": true,
+                    "does_not_accept_identity_authority_from_stdin": true
                 }
             }
         ],

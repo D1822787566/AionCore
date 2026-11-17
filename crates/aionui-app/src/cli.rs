@@ -124,6 +124,8 @@ pub(crate) enum Command {
     /// Channel A of skill delivery: a normal tool call instead of the
     /// `[LOAD_SKILL]` text-protocol round trip.
     Skills(SkillsArgs),
+    /// Prepare, inspect, edit XLS and deliver complete local Office files.
+    File(FileArgs),
     /// PreToolUse permission gate for the Antigravity CLI (spawned by agy).
     /// Reads the tool request on stdin, asks the running AionUi backend, and
     /// writes agy's decision to stdout.
@@ -165,6 +167,7 @@ impl Command {
             Self::Session(_) => "session",
             Self::Conversation(_) => "conversation",
             Self::Skills(_) => "skills",
+            Self::File(_) => "file",
             Self::AntigravityHook => "antigravity-hook",
             Self::McpTeamStdio => "mcp-team-stdio",
             Self::Doctor => "doctor",
@@ -177,6 +180,28 @@ impl Command {
     pub(crate) fn need_runtime(&self) -> bool {
         matches!(self, Self::Doctor | Self::PrepareManagedResources(_))
     }
+}
+
+#[derive(Args, Debug, Clone)]
+pub(crate) struct FileArgs {
+    #[command(subcommand)]
+    pub command: FileCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum FileCommand {
+    Prepare,
+    Inspect,
+    Finish,
+    Xls {
+        #[command(subcommand)]
+        command: FileXlsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum FileXlsCommand {
+    Write,
 }
 
 #[derive(Args, Debug, Clone)]
