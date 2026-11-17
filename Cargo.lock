@@ -333,6 +333,7 @@ dependencies = [
  "aion-mcp",
  "aion-protocol",
  "aion-providers",
+ "aion-tools",
  "aion-types",
  "aionui-api-types",
  "aionui-auth",

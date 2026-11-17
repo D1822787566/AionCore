@@ -43,6 +43,7 @@ aion-types.workspace = true
 aion-protocol.workspace = true
 aion-config.workspace = true
 aion-mcp.workspace = true
+aion-tools.workspace = true
 uuid.workspace = true
 agent-client-protocol = { version = "2.0.0", features = ["unstable_session_fork", "unstable_end_turn_token_usage"] }
 tokio-util = { version = "0.7", features = ["compat", "codec"] }

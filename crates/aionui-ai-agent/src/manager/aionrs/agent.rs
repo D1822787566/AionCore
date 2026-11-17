@@ -110,7 +110,6 @@ pub struct AionrsAgentManager {
     runtime: AgentRuntime,
     engine: Mutex<AgentEngine>,
     vision: Option<Mutex<VisionRuntime>>,
-    original_image_capability: ImageInputCapability,
     /// Static slash command metadata captured at bootstrap so UI lookups do
     /// not wait behind an active `engine.run()` turn.
     slash_commands: Vec<SlashCommandItem>,
@@ -227,6 +226,13 @@ impl AionrsAgentManager {
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
             .runtime_env(runtime_env)
             .operation_contract(aionui_api_types::aion_operation_contract());
+        let host_tools: aion_agent::spawner::HostTools = Default::default();
+        let vision_attachments = resume_session
+            .as_ref()
+            .and_then(|session| session.host_context.get("baitong_image_attachments"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        bootstrap = bootstrap.host_tools(host_tools.clone());
         if let Some(source) = config_extra.host_skills {
             bootstrap = bootstrap.host_skills(source);
         }
@@ -248,8 +254,12 @@ impl AionrsAgentManager {
             .map_err(|e| AgentError::internal(format!("Agent bootstrap failed: {e}")))?;
 
         let mut engine = result.engine;
-        let vision =
-            vision_config.map(|config| Mutex::new(VisionRuntime::new(config, &result.mcp_managers, &vision_servers)));
+        let vision = vision_config.map(|config| {
+            let mut vision = VisionRuntime::new(config, &result.mcp_managers, &vision_servers);
+            vision.host_tools = host_tools;
+            vision.scope.write().unwrap_or_else(|e| e.into_inner()).attachments = vision_attachments;
+            Mutex::new(vision)
+        });
         if !is_resume && let Err(e) = engine.init_session(&provider_label, &workspace, Some(&conversation_id)) {
             error!(
                 conversation_id = %conversation_id,
@@ -292,7 +302,6 @@ impl AionrsAgentManager {
             runtime,
             engine: Mutex::new(engine),
             vision,
-            original_image_capability: image_input_capability,
             slash_commands,
             mcp_managers: result.mcp_managers,
             approval_manager,
@@ -411,7 +420,7 @@ impl IAgentTask for AionrsAgentManager {
         self.dump_aionrs_final_input(&data);
 
         // Keep attachment paths in the provider-independent history. Images
-        // are loaded on demand by aionrs's ViewImage tool.
+        // are loaded on demand by the active image tool.
         debug!(
             attachment_count = data.files.len(),
             "Building structured Aionrs content blocks"
@@ -440,6 +449,15 @@ impl IAgentTask for AionrsAgentManager {
         engine.set_next_turn_id(Some(turn_anchor));
 
         if let Some(vision) = self.vision.as_ref() {
+            {
+                let vision = vision.lock().await;
+                let mut scope = vision.scope.write().unwrap_or_else(|e| e.into_inner());
+                scope.register(&data.files);
+                engine.set_host_context(
+                    "baitong_image_attachments",
+                    serde_json::to_value(&scope.attachments).unwrap_or_default(),
+                );
+            }
             let preparation = tokio::select! {
                 ready = async { vision.lock().await.prepare(&mut engine, self.runtime.conversation_id(), has_image_attachment(&data.files)).await } => Some(ready),
                 _ = self.cancel_notify.notified() => None,
@@ -450,12 +468,9 @@ impl IAgentTask for AionrsAgentManager {
                 self.turn_finished_notify.notify_waiters();
                 return Ok(());
             };
-            let capability = if preparation.is_ok() {
-                self.original_image_capability
-            } else {
-                ImageInputCapability::Unsupported
-            };
-            engine.apply_config_update(None, Some(capability), None, None, None, None);
+            // Managed vision uses the attachment wrapper; historical native
+            // image blocks must not re-enter the old provider upload route.
+            engine.apply_config_update(None, Some(ImageInputCapability::Unsupported), None, None, None, None);
             if let Err(issue) = preparation {
                 if has_image_attachment(&data.files) {
                     let error = AgentSendError::new(

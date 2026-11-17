@@ -6,12 +6,13 @@ use aion_agent::tool_policy::ToolPolicy;
 use aion_config::config::{CliArgs, Config};
 use axum::{Json, Router, http::StatusCode, routing::post};
 use serde_json::json;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 
 struct Fixture {
     config: McpServerConfig,
     status: Arc<AtomicU16>,
     attempts: Arc<AtomicUsize>,
+    legacy: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -24,20 +25,27 @@ impl Drop for Fixture {
 async fn fixture(tool: &str, failures: usize) -> Fixture {
     let status = Arc::new(AtomicU16::new(200));
     let attempts = Arc::new(AtomicUsize::new(0));
+    let legacy = Arc::new(AtomicBool::new(false));
     let status_copy = status.clone();
     let attempts_copy = attempts.clone();
+    let legacy_copy = legacy.clone();
     let tool = tool.to_owned();
     let app = Router::new().route("/mcp", post(move |Json(body): Json<Value>| {
         let status = status_copy.clone();
         let attempts = attempts_copy.clone();
         let tool = tool.clone();
+        let legacy = legacy_copy.load(Ordering::SeqCst);
         async move {
             let attempt = if body["method"] == "initialize" { attempts.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
             let code = if attempt < failures { 503 } else { status.load(Ordering::SeqCst) };
             if code != 200 { return (StatusCode::from_u16(code).unwrap(), Json(json!({}))); }
             let result = match body["method"].as_str().unwrap_or("") {
                 "initialize" => json!({"protocolVersion":"2025-03-26", "capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
-                "tools/list" => json!({"tools":[{"name":tool,"description":"fixture tool","inputSchema":{"type":"object","properties":{}}}]}),
+                    "tools/list" => {
+                        let schema = if legacy { json!({"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}) }
+                            else { json!({"type":"object","properties":{"image_data_url":{"type":"string"},"question":{"type":"string"},"scope_id":{"type":"string"}},"required":["image_data_url","question","scope_id"]}) };
+                        json!({"tools":[{"name":tool,"description":"fixture tool","inputSchema":schema}]})
+                    },
                 "tools/call" => json!({"content":[{"type":"text","text":"fixture result"}],"isError":false}),
                 _ => json!({}),
             };
@@ -53,8 +61,25 @@ async fn fixture(tool: &str, failures: usize) -> Fixture {
         config,
         status,
         attempts,
+        legacy,
         task,
     }
+}
+
+#[tokio::test]
+async fn same_name_old_contract_is_rejected_and_live_schema_is_revalidated() {
+    let server = fixture(TOOL, 0).await;
+    let mut engine = engine(ToolPolicy::default()).await;
+    let mut runtime = runtime(server.config.clone());
+    runtime.prepare(&mut engine, "live-schema", false).await.unwrap();
+    server.legacy.store(true, Ordering::SeqCst);
+    let issue = runtime.prepare(&mut engine, "live-schema", false).await.unwrap_err();
+    assert_eq!(issue.reason, "vision_contract_mismatch");
+    assert!(!engine.is_tool_advertised(TOOL));
+    server.legacy.store(false, Ordering::SeqCst);
+    runtime.prepare(&mut engine, "live-schema", false).await.unwrap();
+    assert!(engine.is_tool_advertised(TOOL));
+    assert!(engine.registry_mut().get("ViewImage").is_none());
 }
 
 async fn engine(policy: ToolPolicy) -> AgentEngine {

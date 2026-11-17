@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use aion_agent::engine::AgentEngine;
@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio::time::{Instant, sleep, timeout_at};
 use tracing::{info, warn};
 
+use super::vision_tool::{ImageScope, VisionTool};
 use crate::types::BaitongVisionConfig;
 
 const SERVER: &str = "vision";
@@ -31,6 +32,8 @@ impl VisionIssue {
     pub(super) fn detail(self) -> String {
         let reason = if self.reason == "disabled" {
             "百通视觉开关已关闭。请在百通模型服务设置中开启后重试。"
+        } else if self.reason == "vision_contract_mismatch" {
+            "图片识别工具与宿主的接口版本不匹配。请使用匹配的 AionCore 与百通适配器；自建视觉 MCP 也须支持显式图片内容契约。"
         } else {
             match self.stage {
                 "configuration" => "读取百通视觉配置失败。请检查百通服务状态后重试。",
@@ -47,6 +50,8 @@ pub(super) struct VisionRuntime {
     config: BaitongVisionConfig,
     manager: Option<Arc<McpManager>>,
     connected_config: Option<Value>,
+    pub(super) scope: Arc<RwLock<ImageScope>>,
+    pub(super) host_tools: aion_agent::spawner::HostTools,
 }
 
 pub(super) fn has_image_attachment(files: &[String]) -> bool {
@@ -87,6 +92,11 @@ impl VisionRuntime {
             config,
             manager,
             connected_config,
+            scope: Arc::new(RwLock::new(ImageScope {
+                id: uuid::Uuid::new_v4().to_string(),
+                ..Default::default()
+            })),
+            host_tools: Default::default(),
         }
     }
 
@@ -97,7 +107,7 @@ impl VisionRuntime {
         require_image: bool,
     ) -> Result<(), VisionIssue> {
         // Every message gets its own preparation budget, independent of idle time.
-        // Text turns make one short attempt so image paths and ViewImage can recover too.
+        // Text turns make one short attempt so historical attachment queries can recover too.
         let budget = if require_image { BUDGET } else { Duration::from_secs(2) };
         self.prepare_until(engine, conversation_id, require_image, Instant::now() + budget)
             .await
@@ -194,7 +204,7 @@ impl VisionRuntime {
                         let names = engine.tool_names();
                         register_single_server_tools(engine.registry_mut(), &manager, SERVER, &names, false);
                     }
-                    return self.validate(engine, conversation_id);
+                    return self.bind(engine, conversation_id, deadline).await;
                 }
                 if live == Some(false) {
                     return self.unavailable(
@@ -244,7 +254,7 @@ impl VisionRuntime {
                     register_single_server_tools(engine.registry_mut(), &manager, SERVER, &names, false);
                     self.manager = Some(manager);
                     self.connected_config = Some(key);
-                    return self.validate(engine, conversation_id);
+                    return self.bind(engine, conversation_id, deadline).await;
                 }
                 Ok(Err(error)) => {
                     let issue = VisionIssue {
@@ -276,6 +286,95 @@ impl VisionRuntime {
                 return self.unavailable(engine, conversation_id, last_issue);
             }
         }
+    }
+
+    async fn bind(
+        &mut self,
+        engine: &mut AgentEngine,
+        conversation_id: &str,
+        deadline: Instant,
+    ) -> Result<(), VisionIssue> {
+        let Some(manager) = self.manager.clone() else {
+            return self.unavailable(
+                engine,
+                conversation_id,
+                VisionIssue {
+                    stage: "connection",
+                    reason: "missing_manager",
+                },
+            );
+        };
+        let tools = match timeout_at(deadline, manager.list_server_tools(SERVER)).await {
+            Ok(Ok(tools)) => tools,
+            Ok(Err(_)) => {
+                return self.unavailable(
+                    engine,
+                    conversation_id,
+                    VisionIssue {
+                        stage: "connection",
+                        reason: "connection_failed",
+                    },
+                );
+            }
+            Err(_) => {
+                return self.unavailable(
+                    engine,
+                    conversation_id,
+                    VisionIssue {
+                        stage: "connection",
+                        reason: "timeout",
+                    },
+                );
+            }
+        };
+        let compatible = tools.iter().any(|tool| {
+            tool.name == TOOL
+                && tool.input_schema["required"].as_array().is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .all(|field| matches!(field.as_str(), Some("image_data_url" | "question" | "scope_id")))
+                })
+                && ["image_data_url", "question", "scope_id"].iter().all(|name| {
+                    tool.input_schema["properties"][name]["type"] == "string"
+                        && tool.input_schema["required"]
+                            .as_array()
+                            .is_some_and(|fields| fields.iter().any(|field| field == name))
+                })
+        });
+        if !compatible {
+            return self.unavailable(
+                engine,
+                conversation_id,
+                VisionIssue {
+                    stage: "discovery",
+                    reason: "vision_contract_mismatch",
+                },
+            );
+        }
+        let Some(name) = engine.registry_mut().mcp_tool_name(SERVER, TOOL) else {
+            return self.unavailable(
+                engine,
+                conversation_id,
+                VisionIssue {
+                    stage: "registration",
+                    reason: "missing_tool",
+                },
+            );
+        };
+        let tool: Arc<dyn aion_tools::Tool> = Arc::new(VisionTool {
+            name,
+            manager,
+            scope: self.scope.clone(),
+        });
+        engine.registry_mut().replace_shared(tool.clone());
+        engine.registry_mut().remove("ViewImage");
+        // Lifecycle calls carry scope IDs and must never be advertised to the model.
+        if let Some(release) = engine.registry_mut().mcp_tool_name(SERVER, "release_image_scope") {
+            engine.registry_mut().remove(&release);
+        }
+        *self.host_tools.write().unwrap_or_else(|e| e.into_inner()) = vec![tool];
+        engine.refresh_tools();
+        self.validate(engine, conversation_id)
     }
 
     fn validate(&self, engine: &mut AgentEngine, conversation_id: &str) -> Result<(), VisionIssue> {
@@ -310,6 +409,8 @@ impl VisionRuntime {
         engine.registry_mut().remove_mcp_server(SERVER);
         self.manager = None;
         self.connected_config = None;
+        self.host_tools.write().unwrap_or_else(|e| e.into_inner()).clear();
+        engine.refresh_tools();
         warn!(
             conversation_id,
             desired_enabled = if issue.reason == "disabled" {
@@ -330,6 +431,29 @@ impl VisionRuntime {
             "Baitong vision preparation unavailable"
         );
         Err(issue)
+    }
+}
+
+impl Drop for VisionRuntime {
+    fn drop(&mut self) {
+        let Some(manager) = self.manager.clone() else { return };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let scope_id = self.scope.read().unwrap_or_else(|e| e.into_inner()).id.clone();
+        if manager
+            .all_tools()
+            .iter()
+            .any(|(server, tool)| *server == SERVER && tool.name == "release_image_scope")
+        {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    manager.call_tool(SERVER, "release_image_scope", serde_json::json!({"scope_id": scope_id})),
+                )
+                .await;
+            });
+        }
     }
 }
 

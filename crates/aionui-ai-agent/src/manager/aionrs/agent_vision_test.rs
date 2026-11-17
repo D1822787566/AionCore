@@ -148,12 +148,19 @@ async fn image_tool_loop_and_recovery_keep_history_and_other_tools() {
             async move {
                 let result = match body["method"].as_str().unwrap_or("") {
                     "initialize" => json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
-                    "tools/list" => json!({"tools":[{"name":"look_at_image","inputSchema":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}}]}),
+                    "tools/list" => json!({"tools":[{"name":"look_at_image","inputSchema":{"type":"object","properties":{"image_data_url":{"type":"string"},"question":{"type":"string"},"scope_id":{"type":"string"}},"required":["image_data_url","question","scope_id"]}}]}),
                     "tools/call" => {
                         assert_eq!(body["params"]["name"], "look_at_image");
-                        assert_eq!(seen.load(Ordering::SeqCst), 1, "image bytes must have reached the adapter/model boundary first");
+                        let arguments = &body["params"]["arguments"];
+                        assert!(arguments["image_data_url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+                        assert!(!arguments["scope_id"].as_str().unwrap().is_empty());
+                        assert!(arguments.get("file_path").is_none());
+                        let bytes = STANDARD.decode(arguments["image_data_url"].as_str().unwrap().split_once(',').unwrap().1).unwrap();
+                        use sha2::{Digest, Sha256};
+                        let digest = format!("{:x}", Sha256::digest(bytes));
+                        seen.store(1, Ordering::SeqCst);
                         calls.fetch_add(1, Ordering::SeqCst);
-                        json!({"content":[{"type":"text","text":"CONTROLLED_VISION_RESULT_RED_SQUARE"}],"isError":false})
+                        json!({"content":[{"type":"text","text":json!({"sha256":digest,"answer":"CONTROLLED_VISION_RESULT_RED_SQUARE"}).to_string()}],"isError":false})
                     }
                     _ => json!({}),
                 };
@@ -168,16 +175,22 @@ async fn image_tool_loop_and_recovery_keep_history_and_other_tools() {
                 let phase = turns.fetch_add(1, Ordering::SeqCst);
                 let names: Vec<_> = body["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
                 assert_eq!(names.iter().filter(|name| **name == "look_at_image").count(), 1);
-                assert!(names.contains(&"ViewImage"));
+                assert!(!names.contains(&"ViewImage"));
+                assert!(!body["messages"].to_string().contains("data:image/png;base64,"));
                 let (delta, finish) = match phase {
-                    0 => (json!({"tool_calls":[{"index":0,"id":"view-1","type":"function","function":{"name":"ViewImage","arguments":json!({"file_path":path}).to_string()}}]}), "tool_calls"),
-                    1 => {
-                        assert!(body["messages"].to_string().contains("data:image/png;base64,"));
-                        seen.store(1, Ordering::SeqCst);
-                        (json!({"tool_calls":[{"index":0,"id":"vision-1","type":"function","function":{"name":"look_at_image","arguments":"{\"question\":\"what color?\"}"}}]}), "tool_calls")
-                    }
+                    0 => (json!({"tool_calls":[{"index":0,"id":"vision-1","type":"function","function":{"name":"look_at_image","arguments":json!({"file_path":path,"question":"what color?"}).to_string()}}]}), "tool_calls"),
+                    2 => (json!({"tool_calls":[{"index":0,"id":"stale-view","type":"function","function":{"name":"ViewImage","arguments":json!({"file_path":path}).to_string()}}]}), "tool_calls"),
+                    4 => (json!({"tool_calls":[{"index":0,"id":"spawn-vision","type":"function","function":{"name":"Spawn","arguments":json!({"tasks":[{"name":"image-child","prompt":format!("Inspect the registered attachment {path}")}]}).to_string()}}]}), "tool_calls"),
+                    5 => {
+                        assert!(!names.contains(&"Spawn"), "this request must come from the child");
+                        (json!({"tool_calls":[{"index":0,"id":"child-vision","type":"function","function":{"name":"look_at_image","arguments":json!({"file_path":path,"question":"child color?"}).to_string()}}]}), "tool_calls")
+                    },
                     _ => {
+                        assert_eq!(seen.load(Ordering::SeqCst), 1);
                         assert!(body["messages"].to_string().contains("CONTROLLED_VISION_RESULT_RED_SQUARE"));
+                        if phase == 3 {
+                            assert!(body["messages"].to_string().contains("Unknown tool: ViewImage"));
+                        }
                         (json!({"content":"CONTROLLED_ANSWER_RED_SQUARE"}), "stop")
                     }
                 };
@@ -203,6 +216,7 @@ async fn image_tool_loop_and_recovery_keep_history_and_other_tools() {
         service: None,
         override_config: Some(server_config.clone()),
     });
+    let resume_config = config.clone();
     let agent = AionrsAgentManager::new("vision-loop".into(), dir.path().to_string_lossy().into(), config, None)
         .await
         .unwrap();
@@ -210,17 +224,23 @@ async fn image_tool_loop_and_recovery_keep_history_and_other_tools() {
         .send_message(message(vec![image.to_string_lossy().into()]))
         .await
         .unwrap();
-    assert_eq!(turns.load(Ordering::SeqCst), 3);
+    assert_eq!(turns.load(Ordering::SeqCst), 2);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    // Rebuild only vision runtime, leaving the engine, approvals and history in place.
-    *agent.vision.as_ref().unwrap().lock().await = VisionRuntime::new(
-        BaitongVisionConfig {
-            service: None,
-            override_config: Some(server_config),
-        },
-        &[],
-        &HashMap::new(),
-    );
+    // Replace the connection while retaining the host's conversation scope.
+    {
+        let mut vision = agent.vision.as_ref().unwrap().lock().await;
+        let mut replacement = VisionRuntime::new(
+            BaitongVisionConfig {
+                service: None,
+                override_config: Some(server_config),
+            },
+            &[],
+            &HashMap::new(),
+        );
+        replacement.scope = vision.scope.clone();
+        replacement.host_tools = vision.host_tools.clone();
+        *vision = replacement;
+    }
     agent.send_message(message(Vec::new())).await.unwrap();
     assert_eq!(turns.load(Ordering::SeqCst), 4);
     let session = SessionManager::new(dir.path().join("sessions"), 100)
@@ -234,5 +254,66 @@ async fn image_tool_loop_and_recovery_keep_history_and_other_tools() {
         1,
         "preparation must never replay an executed tool"
     );
+    assert!(
+        session.host_context["baitong_image_attachments"]
+            .get(image.to_string_lossy().as_ref())
+            .is_some()
+    );
+    agent.send_message(message(Vec::new())).await.unwrap();
+    assert_eq!(
+        turns.load(Ordering::SeqCst),
+        8,
+        "the child must complete its own image tool loop"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the child must inherit the host image wrapper"
+    );
+    // A restart uses host metadata, including after the visible history was compacted.
+    let mut compacted = session.clone();
+    compacted.messages.clear();
+    drop(agent);
+    let resumed = AionrsAgentManager::new(
+        "vision-loop".into(),
+        dir.path().to_string_lossy().into(),
+        resume_config,
+        Some(compacted),
+    )
+    .await
+    .unwrap();
+    {
+        let vision = resumed.vision.as_ref().unwrap().lock().await;
+        assert!(
+            vision
+                .scope
+                .read()
+                .unwrap()
+                .attachments
+                .contains_key(image.to_string_lossy().as_ref())
+        );
+    }
+    let result = {
+        let mut engine = resumed.engine.lock().await;
+        resumed
+            .vision
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .prepare(&mut engine, "vision-loop", false)
+            .await
+            .unwrap();
+        engine
+            .registry_mut()
+            .get("look_at_image")
+            .unwrap()
+            .execute(json!({
+                "file_path":image.to_string_lossy(),"question":"what color?"
+            }))
+            .await
+    };
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     task.abort();
 }
