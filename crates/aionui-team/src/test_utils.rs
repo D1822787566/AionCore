@@ -1089,6 +1089,7 @@ pub(crate) mod workspace_harness {
                         updated_at: Some(now_ms()),
                         project_id: None,
                         folder_id: None,
+                        clear_project_binding: false,
                         name_source: None,
                     },
                 )
