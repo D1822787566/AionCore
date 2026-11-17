@@ -378,6 +378,21 @@ mod tests {
         }
     }
 
+    fn shell_params(unix: &str, windows: &str) -> CreateTerminalParams {
+        if cfg!(windows) {
+            params("cmd", &["/D", "/C", windows])
+        } else {
+            params("sh", &["-c", unix])
+        }
+    }
+
+    fn long_running_params() -> CreateTerminalParams {
+        shell_params(
+            "sleep 30",
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 30\"",
+        )
+    }
+
     /// `wait_for_exit` returns as soon as the direct child is reaped, but the
     /// reader task that drains its stdout is a separate task — so a snapshot
     /// taken the instant after exit can legitimately still be empty. Poll for
@@ -399,7 +414,10 @@ mod tests {
     #[tokio::test]
     async fn create_runs_command_and_reports_output_and_exit() {
         let reg = TerminalRegistry::new("conv-t", None);
-        let id = reg.create(params("echo", &["hello_term"])).await.unwrap();
+        let id = reg
+            .create(shell_params("echo hello_term", "echo hello_term"))
+            .await
+            .unwrap();
         let exit = reg.wait_for_exit(&id).await.unwrap();
         assert_eq!(exit.exit_code, Some(0));
         assert!(!exit.signaled);
@@ -412,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn output_byte_limit_truncates_from_front() {
         let reg = TerminalRegistry::new("conv-t", None);
-        let mut p = params("sh", &["-c", "printf 'AAAA'; printf 'BBBB'"]);
+        let mut p = shell_params("printf 'AAAA'; printf 'BBBB'", "<nul set /p =AAAABBBB");
         p.output_byte_limit = Some(4);
         let id = reg.create(p).await.unwrap();
         reg.wait_for_exit(&id).await.unwrap();
@@ -424,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn kill_terminates_long_command_with_signal() {
         let reg = TerminalRegistry::new("conv-t", None);
-        let id = reg.create(params("sleep", &["30"])).await.unwrap();
+        let id = reg.create(long_running_params()).await.unwrap();
         assert!(reg.kill(&id, "test").await);
         let exit = reg.wait_for_exit(&id).await.unwrap();
         assert!(exit.signaled || exit.exit_code.is_none() || exit.exit_code != Some(0));
@@ -437,8 +455,8 @@ mod tests {
     #[tokio::test]
     async fn release_is_idempotent_and_kill_all_clears() {
         let reg = TerminalRegistry::new("conv-t", None);
-        let id1 = reg.create(params("sleep", &["30"])).await.unwrap();
-        let _id2 = reg.create(params("sleep", &["30"])).await.unwrap();
+        let id1 = reg.create(long_running_params()).await.unwrap();
+        let _id2 = reg.create(long_running_params()).await.unwrap();
         assert!(reg.release(&id1).await);
         assert!(!reg.release(&id1).await);
         reg.kill_all().await;
@@ -457,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn bare_compound_command_runs_through_shell() {
         let reg = TerminalRegistry::new("conv-t", None);
-        let mut p = params("true && echo shell_interpreted", &[]);
+        let mut p = params("echo first && echo shell_interpreted", &[]);
         p.args = vec![];
         let id = reg.create(p).await.unwrap();
         let exit = reg.wait_for_exit(&id).await.unwrap();
@@ -473,7 +491,10 @@ mod tests {
         // sees EOF. Waiting on stream close alone would hang forever.
         let reg = TerminalRegistry::new("conv-t", None);
         let id = reg
-            .create(params("sh", &["-c", "sleep 30 & echo parent_done"]))
+            .create(shell_params(
+                "sleep 30 & echo parent_done",
+                "start \"\" /B powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 30\" & echo parent_done",
+            ))
             .await
             .unwrap();
         let exit = tokio::time::timeout(std::time::Duration::from_secs(5), reg.wait_for_exit(&id))
@@ -492,18 +513,19 @@ mod tests {
         // process on the machine, which made this test flaky.
         let dir = tempfile::TempDir::new().unwrap();
         let reg = TerminalRegistry::new("conv-t", Some(dir.path().to_path_buf()));
-        let id = reg.create(params("pwd", &[])).await.unwrap();
+        let command = if cfg!(windows) { "cd" } else { "pwd" };
+        let id = reg.create(params(command, &[])).await.unwrap();
         reg.wait_for_exit(&id).await.unwrap();
         // `pwd` prints the resolved path (on macOS temp_dir lives under
         // /var -> /private/var), so compare against the canonicalized full path
         // rather than only the trailing directory name.
         let canonical = std::fs::canonicalize(dir.path()).unwrap();
-        let expected = canonical.to_str().unwrap();
-        let snap = wait_for_output_contains(&reg, &id, expected).await;
+        let directory_name = dir.path().file_name().unwrap().to_str().unwrap();
+        let snap = wait_for_output_contains(&reg, &id, directory_name).await;
+        let actual = std::fs::canonicalize(snap.output.trim()).expect("command should print an existing directory");
         assert_eq!(
-            snap.output.trim(),
-            expected,
-            "pwd should report the default cwd; output: {}",
+            actual, canonical,
+            "command should report the default cwd; output: {}",
             snap.output
         );
     }
@@ -514,8 +536,8 @@ mod tests {
         // the frontend's terminal-id-keyed card collides with a stale one.
         let a = TerminalRegistry::new("conv-a", None);
         let b = TerminalRegistry::new("conv-b", None);
-        let id_a = a.create(params("true", &[])).await.unwrap();
-        let id_b = b.create(params("true", &[])).await.unwrap();
+        let id_a = a.create(params("echo id", &[])).await.unwrap();
+        let id_b = b.create(params("echo id", &[])).await.unwrap();
         assert_ne!(id_a, id_b);
     }
 }
