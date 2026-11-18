@@ -57,18 +57,25 @@ mod tests {
         let node_root = root.path().join("node-a");
         let npm_root = root.path().join("node-b");
 
-        std::fs::create_dir_all(node_root.join("bin")).unwrap();
-        std::fs::create_dir_all(npm_root.join("bin")).unwrap();
-        std::fs::write(node_root.join("bin/node"), b"").unwrap();
-        std::fs::write(node_root.join("bin/npx"), b"").unwrap();
-        std::fs::write(npm_root.join("bin/npm"), b"").unwrap();
+        let (node, npm, npx) = if cfg!(windows) {
+            (
+                node_root.join("node.exe"),
+                npm_root.join("npm.cmd"),
+                node_root.join("npx.cmd"),
+            )
+        } else {
+            (
+                node_root.join("bin/node"),
+                npm_root.join("bin/npm"),
+                node_root.join("bin/npx"),
+            )
+        };
+        for path in [&node, &npm, &npx] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        }
 
-        let err = validate_same_root(
-            &node_root.join("bin/node"),
-            &npm_root.join("bin/npm"),
-            &node_root.join("bin/npx"),
-        )
-        .unwrap_err();
+        let err = validate_same_root(&node, &npm, &npx).unwrap_err();
 
         assert!(err.to_string().contains("same runtime root"));
     }

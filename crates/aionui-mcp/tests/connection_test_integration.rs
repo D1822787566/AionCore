@@ -172,9 +172,17 @@ async fn sse_401_returns_needs_auth() {
 async fn stdio_timeout_returns_timeout_error() {
     // Use `sleep` which produces no stdout — our protocol read will block
     let svc = make_service_with_timeout(Duration::from_secs(1));
+    let (command, args) = if cfg!(windows) {
+        (
+            "powershell.exe",
+            vec!["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 60"],
+        )
+    } else {
+        ("sleep", vec!["60"])
+    };
     let transport = McpServerTransport::Stdio {
-        command: "sleep".into(),
-        args: vec!["60".into()],
+        command: command.into(),
+        args: args.into_iter().map(str::to_owned).collect(),
         env: HashMap::new(),
     };
 
@@ -289,9 +297,14 @@ async fn stdio_with_args_spawns_correctly() {
     // Use echo as a simple command that exits immediately
     // Since echo doesn't speak MCP, we expect a protocol error (not a spawn error)
     let svc = make_service_with_timeout(Duration::from_secs(3));
+    let (command, args) = if cfg!(windows) {
+        ("cmd.exe", vec!["/D", "/C", "echo", "hello"])
+    } else {
+        ("echo", vec!["hello"])
+    };
     let transport = McpServerTransport::Stdio {
-        command: "echo".into(),
-        args: vec!["hello".into()],
+        command: command.into(),
+        args: args.into_iter().map(str::to_owned).collect(),
         env: HashMap::new(),
     };
 

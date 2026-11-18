@@ -53,6 +53,8 @@ async fn fixture() -> Fixture {
     let repo = git2::Repository::init(repo_dir.path()).expect("init repo");
     {
         let mut cfg = repo.config().expect("config");
+        cfg.set_bool("core.autocrlf", false).expect("disable autocrlf");
+        cfg.set_str("core.eol", "lf").expect("set LF line endings");
         cfg.set_str("user.name", "scm test").expect("name");
         cfg.set_str("user.email", "scm@test.local").expect("email");
     }
@@ -440,6 +442,8 @@ fn init_committed_repo(dir: &std::path::Path) {
     let repo = git2::Repository::init(dir).expect("init repo");
     {
         let mut cfg = repo.config().expect("config");
+        cfg.set_bool("core.autocrlf", false).expect("disable autocrlf");
+        cfg.set_str("core.eol", "lf").expect("set LF line endings");
         cfg.set_str("user.name", "scm test").expect("name");
         cfg.set_str("user.email", "scm@test.local").expect("email");
     }
@@ -699,7 +703,7 @@ async fn repositories_changed_stops_after_the_session_disconnects() {
     );
 }
 
-/// A folder whose directory basename is blank (literally named "   ") must not
+/// A folder whose directory basename is whitespace-only must not
 /// yield a blank label. The derived `default_display_name` has to filter blanks
 /// the same way the scm seam does, or `display_name || default_display_name ||
 /// pe_id` renders whitespace. Reverting `build_folder_dto` to a non-trim filter
@@ -708,9 +712,16 @@ async fn repositories_changed_stops_after_the_session_disconnects() {
 async fn a_blank_basename_folder_does_not_become_a_blank_label() {
     let fx = fixture().await;
 
-    // A git repo whose own directory name is three spaces.
+    // Win32 trims ASCII spaces from path components; Unicode spaces remain valid
+    // directory names and still exercise the same trim-based blank-name filter.
     let base = tempfile::tempdir().expect("tempdir");
-    let blank_dir = base.path().join("   ");
+    let basename = if cfg!(windows) {
+        "\u{3000}\u{3000}\u{3000}"
+    } else {
+        "   "
+    };
+    assert!(basename.trim().is_empty());
+    let blank_dir = base.path().join(basename);
     std::fs::create_dir(&blank_dir).expect("mkdir blank");
     init_committed_repo(&blank_dir);
 

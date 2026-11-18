@@ -385,11 +385,22 @@ mod tests {
 
     #[test]
     fn linux_show_item_percent_encodes_spaces_in_uri() {
-        let path = Path::new("/home/user/My Downloads/AionUi.deb");
+        let (path, expected) = if cfg!(windows) {
+            (
+                "C:/home/user/My Downloads/AionUi.deb",
+                "['file:///C:/home/user/My%20Downloads/AionUi.deb']",
+            )
+        } else {
+            (
+                "/home/user/My Downloads/AionUi.deb",
+                "['file:///home/user/My%20Downloads/AionUi.deb']",
+            )
+        };
+        let path = Path::new(path);
         let (program, args) = linux_show_item_command(path, true);
         assert_eq!(program, "gdbus");
         assert!(
-            args.contains(&"['file:///home/user/My%20Downloads/AionUi.deb']".to_owned()),
+            args.contains(&expected.to_owned()),
             "space must be percent-encoded, got: {args:?}"
         );
     }

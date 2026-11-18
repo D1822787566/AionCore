@@ -2042,7 +2042,6 @@ async fn create_rejects_unavailable_workspace_with_trailing_whitespace_in_reques
     let dir = std::env::temp_dir().join(format!("aionui-test-{}", aionui_common::generate_short_id()));
     std::fs::create_dir(&dir).unwrap();
     let workspace = dir.join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
     let workspace_with_trailing_space = format!("{} ", workspace.to_string_lossy());
 
     let req: CreateConversationRequest = serde_json::from_value(json!({

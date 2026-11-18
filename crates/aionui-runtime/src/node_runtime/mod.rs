@@ -427,6 +427,7 @@ pub fn doctor_snapshot_for_test(rows: Vec<(&str, &str, &str)>) -> Vec<DoctorRow>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fake_managed_runtime;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -468,6 +469,7 @@ mod tests {
         String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf8")
     }
 
+    #[cfg(unix)]
     fn write_executable(path: &std::path::Path, body: &str) {
         fs::write(path, body).expect("write executable");
         #[cfg(unix)]
@@ -476,26 +478,6 @@ mod tests {
             let mut perms = fs::metadata(path).expect("metadata").permissions();
             perms.set_mode(0o755);
             fs::set_permissions(path, perms).expect("set permissions");
-        }
-    }
-
-    fn fake_managed_runtime(root: &std::path::Path) -> ResolvedNodeRuntime {
-        let bin = root.join("bin");
-        fs::create_dir_all(&bin).expect("create runtime bin");
-        write_executable(&bin.join("node"), "#!/bin/sh\necho v24.11.0\n");
-        write_executable(&bin.join("npm"), "#!/bin/sh\necho 24.11.0\n");
-        write_executable(&bin.join("npx"), "#!/bin/sh\necho 24.11.0\n");
-
-        ResolvedNodeRuntime {
-            source: ResolvedNodeSource::Managed,
-            root: root.to_path_buf(),
-            version: semver::Version::new(0, 0, 0),
-            node_path: bin.join("node"),
-            npm_path: bin.join("npm"),
-            npm_args_prefix: vec![],
-            npx_path: bin.join("npx"),
-            npx_args_prefix: vec![],
-            env: vec![],
         }
     }
 

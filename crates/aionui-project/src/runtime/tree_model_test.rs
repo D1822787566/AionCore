@@ -231,13 +231,27 @@ async fn apply_synthesizes_rename_for_same_inode() {
     std::fs::rename(dir.path().join("old.txt"), dir.path().join("new.txt")).unwrap();
 
     let delta = tree.apply(c.as_str(), Hint::All).await.unwrap().expect("changes");
-    assert_eq!(
-        delta.changes,
+    // LocalFsProvider supplies stable inodes on Unix and 0 (unknown) elsewhere.
+    // The pure diff tests below pin nonzero-inode synthesis on every platform.
+    let expected = if cfg!(unix) {
         vec![Change::Renamed {
             from: "old.txt".to_owned(),
-            to: "new.txt".to_owned()
+            to: "new.txt".to_owned(),
         }]
-    );
+    } else {
+        vec![
+            Change::Added {
+                name: "new.txt".to_owned(),
+                kind: Kind::File,
+            },
+            Change::Removed {
+                name: "old.txt".to_owned(),
+            },
+        ]
+    };
+    assert_eq!(delta.changes, expected);
+    assert_eq!(names(&tree.snapshot(c.as_str()).unwrap().entries), vec!["new.txt"]);
+    assert!(tree.apply(c.as_str(), Hint::All).await.unwrap().is_none());
 }
 
 #[tokio::test]

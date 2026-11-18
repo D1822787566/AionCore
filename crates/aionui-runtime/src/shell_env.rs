@@ -482,10 +482,8 @@ mod tests {
             bins.iter().any(|p| p.ends_with(".nvm/versions/node/v25.1.0/bin")),
             "expected ~/.nvm/versions/node/v25.1.0/bin in result"
         );
-        let nvm_bins: Vec<_> = bins
-            .iter()
-            .filter(|p| p.to_string_lossy().contains(".nvm/versions/node/"))
-            .collect();
+        let nvm_versions = home.join(".nvm").join("versions").join("node");
+        let nvm_bins: Vec<_> = bins.iter().filter(|p| p.starts_with(&nvm_versions)).collect();
         assert_eq!(nvm_bins.len(), 2);
         assert!(
             nvm_bins[0].ends_with(".nvm/versions/node/v25.1.0/bin"),

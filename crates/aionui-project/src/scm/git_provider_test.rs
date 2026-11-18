@@ -10,11 +10,13 @@ use tempfile::TempDir;
 use super::super::trash_sink::TrashSink;
 use super::*;
 
-/// Committer identity for test commits: repo-local config, so a machine without
-/// a global git identity still runs the suite.
+/// Repository-local identity and line endings keep fixtures independent of the
+/// host's global Git identity and CRLF conversion settings.
 fn init_repo(dir: &Path) -> Repository {
     let repo = Repository::init(dir).expect("init repo");
     let mut cfg = repo.config().expect("config");
+    cfg.set_bool("core.autocrlf", false).expect("disable autocrlf");
+    cfg.set_str("core.eol", "lf").expect("set LF line endings");
     cfg.set_str("user.name", "scm test").expect("set name");
     cfg.set_str("user.email", "scm@test.local").expect("set email");
     repo

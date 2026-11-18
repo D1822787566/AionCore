@@ -437,18 +437,25 @@ async fn t4_4_extra_merge_preserves_existing_keys() {
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
-        "extra": { "workspace": old_workspace.to_string_lossy(), "contextFileName": "ctx.md" }
+        "extra": { "workspace": old_workspace.to_string_lossy(), "contextFileName": "ctx.md", "label": "old" }
     }))
     .unwrap();
     let conv = svc.create(USER_ID, req).await.unwrap();
 
-    // Update only workspace
-    let update_req: UpdateConversationRequest =
-        serde_json::from_value(json!({ "extra": { "workspace": new_workspace.to_string_lossy() } })).unwrap();
+    // Workspace changes use project-directory; ordinary fields still merge.
+    let update_req: UpdateConversationRequest = serde_json::from_value(json!({ "extra": { "label": "new" } })).unwrap();
     let updated = svc.update(USER_ID, &conv.id, update_req, &task_mgr).await.unwrap();
 
-    assert_eq!(updated.extra["workspace"], new_workspace.to_string_lossy().to_string());
+    assert_eq!(updated.extra["label"], "new");
+    assert_eq!(updated.extra["workspace"], old_workspace.to_string_lossy().to_string());
     assert_eq!(updated.extra["contextFileName"], "ctx.md");
+
+    let update_req: UpdateConversationRequest =
+        serde_json::from_value(json!({ "extra": { "workspace": new_workspace.to_string_lossy() } })).unwrap();
+    assert!(matches!(
+        svc.update(USER_ID, &conv.id, update_req, &task_mgr).await,
+        Err(ConversationError::BadRequest { .. })
+    ));
 }
 
 #[tokio::test]
@@ -652,8 +659,6 @@ async fn t12_3_concurrent_creates() {
 #[tokio::test]
 async fn full_lifecycle_create_get_update_delete() {
     let (svc, broadcaster, task_mgr) = setup().await;
-    let updated_workspace = std::env::temp_dir().join("aionui-conversation-crud-updated-workspace");
-    std::fs::create_dir_all(&updated_workspace).unwrap();
 
     // Create
     let created = svc.create(USER_ID, make_create_req()).await.unwrap();
@@ -667,16 +672,14 @@ async fn full_lifecycle_create_get_update_delete() {
     let update_req: UpdateConversationRequest = serde_json::from_value(json!({
         "name": "Updated",
         "pinned": true,
-        "extra": { "workspace": updated_workspace.to_string_lossy() }
+        "extra": { "label": "updated" }
     }))
     .unwrap();
     let updated = svc.update(USER_ID, &created.id, update_req, &task_mgr).await.unwrap();
     assert_eq!(updated.name, "Updated");
     assert!(updated.pinned);
-    assert_eq!(
-        updated.extra["workspace"],
-        updated_workspace.to_string_lossy().to_string()
-    );
+    assert_eq!(updated.extra["label"], "updated");
+    assert_eq!(updated.extra["workspace"], created.extra["workspace"]);
 
     // Delete
     svc.delete(USER_ID, &created.id).await.unwrap();

@@ -366,7 +366,20 @@ fn resolve_program(program: &OsStr) -> OsString {
 mod tests {
     use super::*;
     use crate::ResolvedCommand;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
+
+    fn shell_program() -> &'static str {
+        if cfg!(windows) { "powershell" } else { "sh" }
+    }
+
+    fn shell_args<'a>(unix_script: &'a str, windows_script: &'a str) -> Vec<&'a str> {
+        if cfg!(windows) {
+            vec!["-NoProfile", "-NonInteractive", "-Command", windows_script]
+        } else {
+            vec!["-c", unix_script]
+        }
+    }
 
     #[tokio::test]
     async fn clean_cli_captures_stdout_and_strips_env_pollution() {
@@ -381,9 +394,12 @@ mod tests {
 
         // Ask the child to print NODE_OPTIONS + CLAUDECODE; Builder must
         // have removed them.
-        let mut b = Builder::clean_cli("sh");
-        b.arg("-c")
-            .arg("echo \"NO:${NODE_OPTIONS:-unset} CC:${CLAUDECODE:-unset}\"");
+        let mut b = Builder::clean_cli(shell_program());
+        b.args(shell_args(
+            "echo \"NO:${NODE_OPTIONS:-unset} CC:${CLAUDECODE:-unset}\"",
+            "if ($env:NODE_OPTIONS) {'NO:present'} else {'NO:unset'}; \
+             if ($env:CLAUDECODE) {'CC:present'} else {'CC:unset'}",
+        ));
         let output = b.output().await.unwrap();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -394,8 +410,11 @@ mod tests {
 
     #[tokio::test]
     async fn clean_cli_sets_no_color_and_term_dumb() {
-        let mut b = Builder::clean_cli("sh");
-        b.arg("-c").arg("echo \"NC:${NO_COLOR:-unset} TERM:${TERM:-unset}\"");
+        let mut b = Builder::clean_cli(shell_program());
+        b.args(shell_args(
+            "echo \"NC:${NO_COLOR:-unset} TERM:${TERM:-unset}\"",
+            "\"NC:$env:NO_COLOR TERM:$env:TERM\"",
+        ));
         let output = b.output().await.unwrap();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -407,8 +426,8 @@ mod tests {
     async fn agent_allows_stdio_override() {
         // agent() defaults to inherit. Override to piped, then verify
         // we can capture output.
-        let mut b = Builder::new("sh");
-        b.arg("-c").arg("echo hello").stdout(Stdio::piped());
+        let mut b = Builder::new(shell_program());
+        b.args(shell_args("echo hello", "'hello'")).stdout(Stdio::piped());
         let output = b.output().await.unwrap();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -423,10 +442,13 @@ mod tests {
             return;
         }
 
-        let mut b = Builder::new("sh");
-        b.arg("-c")
-            .arg("echo \"NI:${NODE_INSPECT:-unset} ND:${NODE_DEBUG:-unset}\"")
-            .stdout(Stdio::piped());
+        let mut b = Builder::new(shell_program());
+        b.args(shell_args(
+            "echo \"NI:${NODE_INSPECT:-unset} ND:${NODE_DEBUG:-unset}\"",
+            "if ($env:NODE_INSPECT) {'NI:present'} else {'NI:unset'}; \
+             if ($env:NODE_DEBUG) {'ND:present'} else {'ND:unset'}",
+        ))
+        .stdout(Stdio::piped());
         let output = b.output().await.unwrap();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -436,8 +458,8 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_returns_child_with_pid() {
-        let mut b = Builder::new("sh");
-        b.arg("-c").arg("sleep 0.05");
+        let mut b = Builder::new(shell_program());
+        b.args(shell_args("sleep 0.05", "Start-Sleep -Milliseconds 50"));
         let mut child = b.spawn().unwrap();
         assert!(child.id().is_some());
         let status = child.wait().await.unwrap();
@@ -458,6 +480,17 @@ mod tests {
             preview.contains("hello"),
             "preview should include args prefix: {preview}"
         );
+        let command = builder.inner.as_std();
+        assert_eq!(command.get_program(), resolved.program.as_os_str());
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec![OsStr::new("hello")]);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "NO_COLOR" && value == Some(OsStr::new("1")))
+        );
+        // Windows Command Debug omits environment and cwd; inspect the actual
+        // command above, and keep the Unix shell-preview assertion on Unix.
+        #[cfg(unix)]
         assert!(preview.contains("NO_COLOR=\"1\"") || preview.contains("NO_COLOR=1"));
     }
 
@@ -469,19 +502,36 @@ mod tests {
             .args(["x", "--flag", "with space"]);
 
         let preview = format!("{b}");
-        // Format inherited from std Command Debug: `cd "..." && env -u X K=V "prog" "args"...`
+        let command = b.inner.as_std();
+        assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/work dir")));
         assert!(
-            preview.starts_with(r#"cd "/tmp/work dir" &&"#),
-            "missing cwd prefix: {preview}"
+            command
+                .get_envs()
+                .any(|(key, value)| key == "FOO" && value == Some(OsStr::new("bar baz")))
         );
-        assert!(preview.contains("env "), "expected env section: {preview}");
-        assert!(preview.contains(r#"FOO="bar baz""#), "FOO missing: {preview}");
-        // strip_pollution unsets these
-        assert!(
-            preview.contains("-u NODE_OPTIONS"),
-            "missing -u NODE_OPTIONS: {preview}"
-        );
-        assert!(preview.contains("-u CLAUDECODE"), "missing -u CLAUDECODE: {preview}");
+        for key in ["NODE_OPTIONS", "NODE_INSPECT", "NODE_DEBUG", "CLAUDECODE"] {
+            assert!(
+                command.get_envs().any(|(name, value)| name == key && value.is_none()),
+                "missing environment removal for {key}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            // Unix Command Debug: `cd "..." && env -u X K=V "prog" "args"...`.
+            assert!(
+                preview.starts_with(r#"cd "/tmp/work dir" &&"#),
+                "missing cwd prefix: {preview}"
+            );
+            assert!(preview.contains("env "), "expected env section: {preview}");
+            assert!(preview.contains(r#"FOO="bar baz""#), "FOO missing: {preview}");
+            assert!(
+                preview.contains("-u NODE_OPTIONS"),
+                "missing -u NODE_OPTIONS: {preview}"
+            );
+            assert!(preview.contains("-u CLAUDECODE"), "missing -u CLAUDECODE: {preview}");
+        }
+        #[cfg(windows)]
+        assert_eq!(preview, r#""/usr/local/bin/node" "x" "--flag" "with space""#);
         assert!(
             preview.contains(r#""/usr/local/bin/node""#),
             "program missing: {preview}"

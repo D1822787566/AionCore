@@ -222,21 +222,21 @@ async fn persistent_npm_version_failure_still_reports_bundled_resource_invalid()
 async fn managed_runtime_validation_uses_real_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("node-v24.11.0-test");
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-
-    let node = bin.join("node");
-    std::fs::write(&node, "#!/bin/sh\necho v24.11.0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&node).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&node, perms).unwrap();
-    }
+    let runtime = crate::test_support::fake_managed_runtime(&root);
+    // Keep every entrypoint present so validation must execute npm, rather
+    // than failing while resolving a missing node/npm/npx file.
+    let failure = if cfg!(windows) {
+        "@echo off\r\nexit /b 7\r\n"
+    } else {
+        "#!/bin/sh\nexit 7\n"
+    };
+    std::fs::write(&runtime.npm_path, failure).unwrap();
 
     let err = validate_managed_runtime(&root, None).await.unwrap_err();
-    assert!(err.to_string().to_ascii_lowercase().contains("npm"));
+    assert!(
+        err.to_string().starts_with("npm exited with "),
+        "expected the real npm subprocess to fail, got: {err}"
+    );
 }
 
 #[test]
@@ -461,11 +461,10 @@ fn managed_runtime_checksum_verification_detects_mismatch() {
 fn managed_runtime_injects_npm_state_under_runtime_root() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("node-v24.11.0-test");
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(bin.join("node"), b"").unwrap();
-    std::fs::write(bin.join("npm"), b"").unwrap();
-    std::fs::write(bin.join("npx"), b"").unwrap();
+    let layout = current_managed_node_archive_layout();
+    write_file(&managed_node_path_for_layout(&root, layout));
+    write_file(&managed_wrapper_path_for_layout(&root, layout, "npm"));
+    write_file(&managed_wrapper_path_for_layout(&root, layout, "npx"));
 
     let runtime = runtime_from_root(&root, ResolvedNodeSource::Managed).expect("runtime");
     let env: std::collections::HashMap<_, _> = runtime
@@ -506,45 +505,30 @@ async fn bundled_runtime_validation_failure_does_not_fallback_to_remote_download
         return;
     }
     let bundled_root = std::path::PathBuf::from(std::env::var_os("AIONUI_BUNDLED_MANAGED_RESOURCES").unwrap());
-    let runtime_root = bundled_root.join("node").join("node-v24.11.0-darwin-arm64");
-    let bin = runtime_root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-
-    let node = bin.join("node");
-    std::fs::write(&node, "#!/bin/sh\necho v24.11.0\n").unwrap();
-    let npm = bin.join("npm");
-    std::fs::write(&npm, "#!/bin/sh\nexit 1\n").unwrap();
-    let npx = bin.join("npx");
-    std::fs::write(&npx, "#!/bin/sh\nexit 1\n").unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for path in [&node, &npm, &npx] {
-            let mut perms = std::fs::metadata(path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(path, perms).unwrap();
-        }
+    let spec = platform_spec().expect("supported platform");
+    let runtime_root = bundled_root.join("node").join(spec.directory_name());
+    let runtime = crate::test_support::fake_managed_runtime(&runtime_root);
+    let failure = if cfg!(windows) {
+        "@echo off\r\nexit /b 1\r\n"
+    } else {
+        "#!/bin/sh\nexit 1\n"
+    };
+    for path in [&runtime.npm_path, &runtime.npx_path] {
+        std::fs::write(path, failure).unwrap();
     }
 
     managed_resources::set_managed_resources_mode(managed_resources::ManagedResourcesMode::Bundled);
     let runtime_root = tmp.path().join("runtime").join("node");
     std::fs::create_dir_all(&runtime_root).unwrap();
-    let result = activate_local_runtime_source(
-        &runtime_root,
-        PlatformSpec {
-            folder_suffix: "darwin-arm64",
-            archive_ext: "tar.gz",
-            runtime_key: "darwin-arm64",
-            executable: "bin/node",
-        },
-        None,
-    )
-    .await;
+    let result = activate_local_runtime_source(&runtime_root, spec, None).await;
     managed_resources::set_managed_resources_mode(managed_resources::ManagedResourcesMode::Download);
 
     let error = result.expect_err("bundled validation failure should abort");
     assert!(error.to_string().contains("bundled Node runtime failed validation"));
+    assert!(
+        error.to_string().contains("npm exited with "),
+        "expected the bundled npm subprocess to fail, got: {error}"
+    );
 }
 
 #[test]
