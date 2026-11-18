@@ -493,7 +493,8 @@ mod tests {
         let id = reg
             .create(shell_params(
                 "sleep 30 & echo parent_done",
-                "start \"\" /B powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 30\" & echo parent_done",
+                // Keep embedded quotes out so cmd really starts a child that retains the pipe.
+                "start /B powershell.exe -NoLogo -NoProfile -NonInteractive -Command Start-Sleep -Seconds 30 & echo parent_done",
             ))
             .await
             .unwrap();
