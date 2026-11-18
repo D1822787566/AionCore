@@ -26,6 +26,9 @@ const PARENT_SCOPED: &[(&str, &str, &str)] = &[
     ("cron_job_runs", "job_id", "cron_jobs"),
     ("mailbox", "team_id", "teams"),
     ("messages", "conversation_id", "conversations"),
+    // Entries inherit the same root through subagent_runs.conversation_id.
+    ("subagent_entries", "child_run_id", "conversations"),
+    ("subagent_runs", "conversation_id", "conversations"),
     ("team_tasks", "team_id", "teams"),
 ];
 
