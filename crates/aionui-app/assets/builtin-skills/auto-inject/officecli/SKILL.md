@@ -1,6 +1,6 @@
 ---
 name: officecli
-description: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx), and use AionUi built-in file operations for legacy .xls. Use when the user wants to read or edit an Office attachment or local file.
+description: Create, analyze, proofread, and edit Office files (.docx, .xlsx, .pptx). Use AionUi file operations for legacy .xls. Use for Office attachments or local files.
 ---
 
 > **⚠️ Platform note — read before running any command.** The shell snippets in this skill are written for **macOS / Linux** (bash/zsh). Always check which OS you are on first. On **Windows** do **not** run them verbatim — the underlying tool/CLI commands are usually cross-platform, but the surrounding shell syntax is not. Translate it to PowerShell before running:
