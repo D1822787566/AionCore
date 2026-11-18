@@ -574,6 +574,13 @@ impl StreamRelay {
                             }
                             break outcome;
                         }
+                        AgentStreamEvent::Subagent(_) => {
+                            // Child execution is side-effect evidence even if a parent
+                            // tool frame was lost. It must never make an empty turn
+                            // eligible for automatic replay, or split parent text.
+                            attempt.saw_tool_or_side_effect = true;
+                            self.forward_to_websocket(&event);
+                        }
                         AgentStreamEvent::ToolCall(data) => {
                             attempt.saw_tool_or_side_effect = true;
                             self.complete_active_thinking(&mut active_thinking).await;
@@ -789,6 +796,7 @@ impl StreamRelay {
 
     fn event_kind(event: &AgentStreamEvent) -> &'static str {
         match event {
+            AgentStreamEvent::Subagent(_) => "Subagent",
             AgentStreamEvent::Start(_) => "Start",
             AgentStreamEvent::Text(_) => "Text",
             AgentStreamEvent::Tips(_) => "Tips",
@@ -1086,6 +1094,77 @@ mod tests {
     use tracing_subscriber::fmt;
 
     // ── run() async tests ─────────────────────────────────────────
+
+    fn subagent_observation() -> AgentStreamEvent {
+        serde_json::from_value(json!({
+            "type":"subagent",
+            "data":{"run":{
+                "child_run_id":"child","conversation_id":"conv-1","turn_id":"turn-1",
+                "parent_call_id":"aionrs-spawn","task_index":0,"name":"same","prompt":"child task",
+                "status":"completed","started_at":1,"ended_at":2,"elapsed_ms":1,
+                "result":"child-only result","seq":1,"incomplete":false
+            },"entries":[],"durable":true}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn subagent_observation_does_not_split_or_pollute_parent_text() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(64));
+        let mut live = bus.subscribe();
+        let relay = StreamRelay::new(
+            "conv-1".into(),
+            "asst-1".into(),
+            "turn-1".into(),
+            "user-1".into(),
+            repo.clone(),
+            bus,
+        );
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "parent ".into(),
+        }))
+        .unwrap();
+        tx.send(subagent_observation()).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "answer".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        relay.consume(rx).await;
+        let messages = repo.take_inserts();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&messages[0].content).unwrap()["content"],
+            "parent answer"
+        );
+        let mut saw_child = false;
+        while let Ok(event) = live.try_recv() {
+            saw_child |= event.name == "message.stream" && event.data["type"] == "subagent";
+        }
+        assert!(saw_child);
+    }
+
+    #[tokio::test]
+    async fn child_execution_evidence_prevents_replay_when_parent_tool_frame_is_missing() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(16));
+        let relay = StreamRelay::new(
+            "conv-1".into(),
+            "asst-1".into(),
+            "turn-1".into(),
+            "user-1".into(),
+            repo,
+            bus,
+        );
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(subagent_observation()).unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+        let outcome = relay.consume(rx).await;
+        assert!(!outcome.attempt.saw_visible_output);
+        assert!(!outcome.attempt.safe_to_auto_replay());
+    }
 
     #[derive(Clone)]
     struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);

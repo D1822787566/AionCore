@@ -25,6 +25,7 @@ use crate::types::BuildTaskOptions;
 
 /// Dependencies needed by the agent factory to construct agents.
 pub struct AgentFactoryDeps {
+    pub subagent_repo: Option<Arc<dyn aionui_db::ISubagentRepository>>,
     pub skill_manager: Arc<AcpSkillManager>,
     pub provider_repo: Arc<dyn IProviderRepository>,
     pub encryption_key: [u8; 32],

@@ -169,6 +169,7 @@ async fn wait_for_event(
 /// Get a short name for the event type (for debug output).
 fn event_type_name(event: &AgentStreamEvent) -> &'static str {
     match event {
+        AgentStreamEvent::Subagent(_) => "Subagent",
         AgentStreamEvent::Start(_) => "Start",
         AgentStreamEvent::Text(_) => "Text",
         AgentStreamEvent::Tips(_) => "Tips",

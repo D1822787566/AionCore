@@ -1,5 +1,6 @@
 pub mod permission;
 pub mod session_updates;
+pub mod subagent;
 pub mod tool_call;
 pub mod translate;
 
@@ -26,6 +27,7 @@ pub(crate) use translate::{permission_request_to_event_data, session_notificatio
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentStreamEvent {
+    Subagent(aionui_api_types::SubagentUpdate),
     Start(StartEventData),
     #[serde(rename = "content")]
     Text(TextEventData),

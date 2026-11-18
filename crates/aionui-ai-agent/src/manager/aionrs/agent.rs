@@ -31,11 +31,13 @@ use crate::agent_task::IAgentTask;
 use crate::capability::backend_output_sink::BackendOutputSink;
 use crate::capability::backend_protocol_sink::BackendProtocolSink;
 use crate::capability::image_input::resolve_image_input_capability;
+use crate::capability::subagent_recorder::SubagentRecorder;
 use crate::dev_prompt_dump::{AgentFinalInputDump, dump_agent_final_input};
 use crate::error::AgentError;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{AionrsResolvedConfig, SendMessageData};
+use aionui_db::ISubagentRepository;
 
 use super::content::build_content_blocks;
 use super::error::{aionrs_engine_error_to_send_error, aionrs_runtime_error_summary};
@@ -109,6 +111,7 @@ fn build_aionrs_final_input_dump_value(
 pub struct AionrsAgentManager {
     runtime: AgentRuntime,
     engine: Mutex<AgentEngine>,
+    subagents: Option<Arc<SubagentRecorder>>,
     vision: Option<Mutex<VisionRuntime>>,
     /// Static slash command metadata captured at bootstrap so UI lookups do
     /// not wait behind an active `engine.run()` turn.
@@ -147,8 +150,25 @@ impl AionrsAgentManager {
         config_extra: AionrsResolvedConfig,
         resume_session: Option<Session>,
     ) -> Result<Self, AgentError> {
+        Self::new_with_subagents(conversation_id, workspace, config_extra, resume_session, None).await
+    }
+
+    pub(crate) async fn new_with_subagents(
+        conversation_id: String,
+        workspace: String,
+        config_extra: AionrsResolvedConfig,
+        resume_session: Option<Session>,
+        recording: Option<(Arc<dyn ISubagentRepository>, String)>,
+    ) -> Result<Self, AgentError> {
         let runtime = AgentRuntime::new(conversation_id.clone(), workspace.clone(), 128);
-        let sink: Arc<dyn OutputSink> = Arc::new(BackendOutputSink::new(runtime.event_sender()));
+        let subagents = recording.map(|(repo, user_id)| {
+            SubagentRecorder::new(repo, user_id, conversation_id.clone(), runtime.event_sender())
+        });
+        let mut sink = BackendOutputSink::new(runtime.event_sender());
+        if let Some(recorder) = &subagents {
+            sink = sink.with_subagents(recorder.clone());
+        }
+        let sink: Arc<dyn OutputSink> = Arc::new(sink);
         let runtime_env = config_extra.runtime_env.clone();
         let image_input_override = config_extra.compat_overrides.image_input;
         let image_input_capability = image_input_override.unwrap_or_else(|| {
@@ -301,6 +321,7 @@ impl AionrsAgentManager {
         Ok(Self {
             runtime,
             engine: Mutex::new(engine),
+            subagents,
             vision,
             slash_commands,
             mcp_managers: result.mcp_managers,
@@ -446,6 +467,9 @@ impl IAgentTask for AionrsAgentManager {
             .send(AgentStreamEvent::BackendTurnBound(turn_anchor.clone()));
 
         let mut engine = self.engine.lock().await;
+        if let Some(recorder) = &self.subagents {
+            recorder.begin_turn(&turn_anchor);
+        }
         engine.set_next_turn_id(Some(turn_anchor));
 
         if let Some(vision) = self.vision.as_ref() {
@@ -513,6 +537,10 @@ impl IAgentTask for AionrsAgentManager {
             }
         };
 
+        engine.drain_subagents().await;
+        if let Some(recorder) = &self.subagents {
+            recorder.flush().await;
+        }
         let elapsed_ms = now_ms() - started_at;
         self.runtime.bump_activity();
 

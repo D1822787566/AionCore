@@ -20,6 +20,7 @@ use aionui_db::{
     SqliteProviderRepository, SqliteSettingsRepository, SqliteSkillRepository, SqliteUserOrderStore,
     SqliteUserRepository,
 };
+use aionui_db::{ISubagentRepository, SqliteSubagentRepository};
 use aionui_project::ProjectService;
 use aionui_realtime::{BroadcastEventBus, WebSocketManager};
 use aionui_session_message::QueueClearingCancelHook;
@@ -389,7 +390,14 @@ impl AppServices {
             machine_id,
         ));
 
+        let subagent_repo: Arc<dyn ISubagentRepository> =
+            Arc::new(SqliteSubagentRepository::new(database.pool().clone()));
+        let recovered = subagent_repo.recover_interrupted().await?;
+        if recovered > 0 {
+            tracing::warn!(recovered, "Marked interrupted subagent records unknown");
+        }
         let factory = build_agent_factory(AgentFactoryDeps {
+            subagent_repo: Some(subagent_repo),
             skill_manager: AcpSkillManager::new_with_repo(skill_paths.clone(), skill_repo.clone()),
             provider_repo,
             encryption_key,
@@ -589,6 +597,7 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
     service.with_assistant_definition_repo(Arc::new(SqliteAssistantDefinitionRepository::new(
         deps.database.pool().clone(),
     )));
+    service.with_subagent_repo(Arc::new(SqliteSubagentRepository::new(deps.database.pool().clone())));
     service.with_assistant_state_repo(Arc::new(SqliteAssistantOverlayRepository::new(
         deps.database.pool().clone(),
     )));

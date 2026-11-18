@@ -2,6 +2,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+#[path = "subagent_history.rs"]
+mod subagent_history;
 
 use aionui_ai_agent::session_context::{AgentSessionContext, AgentSessionKind};
 use aionui_ai_agent::types::BuildTaskOptions;
@@ -392,6 +394,7 @@ fn reject_deprecated_runtime_row(row: &ConversationRow) -> Result<(), Conversati
 
 #[derive(Clone)]
 pub struct ConversationService {
+    subagent_repo: Arc<RwLock<Option<Arc<dyn aionui_db::ISubagentRepository>>>>,
     workspace_root: PathBuf,
     broadcaster: Arc<dyn EventBroadcaster>,
     skill_resolver: Arc<dyn SkillResolver>,
@@ -490,6 +493,7 @@ impl ConversationService {
         acp_session_repo: Arc<dyn IAcpSessionRepository>,
     ) -> Self {
         Self {
+            subagent_repo: Arc::new(RwLock::new(None)),
             workspace_root,
             broadcaster,
             skill_resolver,

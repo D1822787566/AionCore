@@ -35,6 +35,7 @@ mod sidebar;
 mod skill;
 mod skill_delivery;
 mod skill_runtime;
+mod subagent;
 mod system;
 mod team;
 mod team_mcp;
@@ -211,6 +212,10 @@ pub use skill_runtime::{
     RuntimeSkillFileQuery, RuntimeSkillFileResponse, RuntimeSkillListItem, RuntimeSkillListResponse,
     RuntimeSkillShowResponse, SKILL_RUNTIME_SCHEMA_VERSION, SkillRuntimeEnvelope, SkillRuntimeErrorCode,
     SkillRuntimeErrorPayload, SkillRuntimeMeta,
+};
+pub use subagent::{
+    SubagentEntriesQuery, SubagentEntriesResponse, SubagentEntry, SubagentListQuery, SubagentListResponse, SubagentRun,
+    SubagentUpdate,
 };
 pub use system::{
     ClientPreferencesResponse, CurrentUserResponse, FeedbackDiagnosticsContextResponse,

@@ -1,4 +1,6 @@
+use super::subagent_recorder::SubagentRecorder;
 use aion_agent::output::OutputSink;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::protocol::events::{
@@ -8,11 +10,20 @@ use crate::protocol::events::{
 
 pub struct BackendOutputSink {
     event_tx: broadcast::Sender<AgentStreamEvent>,
+    subagents: Option<Arc<SubagentRecorder>>,
 }
 
 impl BackendOutputSink {
     pub fn new(event_tx: broadcast::Sender<AgentStreamEvent>) -> Self {
-        Self { event_tx }
+        Self {
+            event_tx,
+            subagents: None,
+        }
+    }
+
+    pub(crate) fn with_subagents(mut self, recorder: Arc<SubagentRecorder>) -> Self {
+        self.subagents = Some(recorder);
+        self
     }
 
     fn internal_call_id(tool_use_id: &str) -> Option<String> {
@@ -26,6 +37,11 @@ impl BackendOutputSink {
 }
 
 impl OutputSink for BackendOutputSink {
+    fn emit_subagent(&self, event: aion_types::subagent::SubagentEvent) {
+        if let Some(recorder) = &self.subagents {
+            recorder.emit(event);
+        }
+    }
     fn emit_text_delta(&self, text: &str, _msg_id: &str) {
         let _ = self.event_tx.send(AgentStreamEvent::Text(TextEventData {
             content: text.to_owned(),
@@ -135,12 +151,19 @@ impl OutputSink for BackendOutputSink {
         _cache_creation_tokens: u64,
         _cache_read_tokens: u64,
     ) {
+        // The manager drains child records before publishing the parent terminal.
+        if self.subagents.is_some() {
+            return;
+        }
         let _ = self
             .event_tx
             .send(AgentStreamEvent::Finish(FinishEventData { session_id: None }));
     }
 
     fn emit_error(&self, msg: &str) {
+        if self.subagents.is_some() {
+            return;
+        }
         let _ = self
             .event_tx
             .send(AgentStreamEvent::Error(ErrorEventData::legacy(msg, None)));

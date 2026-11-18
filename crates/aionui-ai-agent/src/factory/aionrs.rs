@@ -267,7 +267,10 @@ pub(super) async fn build(
         }
     }
 
-    let agent = AionrsAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session).await?;
+    let recording = deps.subagent_repo.clone().map(|repo| (repo, ctx.user_id));
+    let agent =
+        AionrsAgentManager::new_with_subagents(ctx.conversation_id, ctx.workspace, config, resume_session, recording)
+            .await?;
     Ok(AgentInstance::Aionrs(Arc::new(agent)))
 }
 

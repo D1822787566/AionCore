@@ -130,6 +130,11 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/messages/latest", get(latest_msg))
         .route("/api/conversations/{id}/messages/{messageId}", get(get_msg))
         .route("/api/conversations/{id}/artifacts", get(list_artifacts))
+        .route("/api/conversations/{id}/subagents", get(list_subagents))
+        .route(
+            "/api/conversations/{id}/subagents/{childId}/entries",
+            get(subagent_entries),
+        )
         .route("/api/conversations/{id}/artifacts/{artifactId}", patch(update_artifact))
         .route("/api/conversations/{id}/cancel", post(cancel))
         .route(
@@ -364,6 +369,36 @@ async fn list_artifacts(
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn list_subagents(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<aionui_api_types::SubagentListQuery>,
+) -> Result<Json<ApiResponse<aionui_api_types::SubagentListResponse>>, ApiError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .list_subagents(&user.id, &id, query)
+            .await
+            .map_err(ApiError::from)?,
+    )))
+}
+
+async fn subagent_entries(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((id, child_id)): Path<(String, String)>,
+    Query(query): Query<aionui_api_types::SubagentEntriesQuery>,
+) -> Result<Json<ApiResponse<aionui_api_types::SubagentEntriesResponse>>, ApiError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .subagent_entries(&user.id, &id, &child_id, query)
+            .await
+            .map_err(ApiError::from)?,
+    )))
 }
 
 #[derive(serde::Deserialize)]

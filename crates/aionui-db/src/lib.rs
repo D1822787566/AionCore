@@ -66,4 +66,5 @@ pub use repository::{
 };
 
 // Re-export sqlx pool type for downstream crates
+pub use repository::{ISubagentRepository, SqliteSubagentRepository};
 pub use sqlx::SqlitePool;
