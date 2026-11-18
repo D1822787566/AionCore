@@ -1295,6 +1295,18 @@ async fn replace_existing_path(path: &Path) -> Result<(), ExtensionError> {
         Err(e) => return Err(e.into()),
     };
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const DIRECTORY_REPARSE_POINT: u32 = 0x10 | 0x400;
+        // symlink_metadata reports is_dir=false for junctions. Inspect the
+        // directory/reparse attributes even when the target is gone.
+        if metadata.file_attributes() & DIRECTORY_REPARSE_POINT == DIRECTORY_REPARSE_POINT {
+            tokio::fs::remove_dir(path).await?;
+            return Ok(());
+        }
+    }
+
     if metadata.file_type().is_symlink() || metadata.is_file() {
         tokio::fs::remove_file(path).await?;
     } else {
@@ -2986,6 +2998,22 @@ mod tests {
                 .unwrap()
                 .contains("Fresh source")
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn replacing_a_directory_junction_preserves_its_target() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("keep.txt"), "keep").unwrap();
+        let link = tmp.path().join("link");
+        create_symlink(&source, &link).await.unwrap();
+
+        replace_existing_path(&link).await.unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(std::fs::read_to_string(source.join("keep.txt")).unwrap(), "keep");
     }
 
     #[tokio::test]
