@@ -677,9 +677,10 @@ async fn agent_overrides_roundtrip_and_management_summary() {
 async fn npx_bridged_agent_rejects_command_override() {
     let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
+    let runtime_fixture = tempfile::tempdir().unwrap();
+    let missing_npx = runtime_fixture.path().join("npx");
 
-    // Seed a builtin npx-bridged ACP row (command == "npx", bridge_binary != binary_name),
-    // mirroring the ACP Registry agents such as Kilo.
+    // Keep real bridge metadata, but avoid installing a runtime during the env-save health check.
     services
         .agent_registry
         .repo_handle()
@@ -695,7 +696,7 @@ async fn npx_bridged_agent_rejects_command_override() {
             agent_source: "builtin",
             agent_source_info: Some(r#"{"binary_name":"kilo","bridge_binary":"npx"}"#),
             enabled: true,
-            command: Some("npx"),
+            command: Some(missing_npx.to_str().unwrap()),
             args: Some(r#"["-y","@kilocode/cli","acp"]"#),
             env: Some("[]"),
             native_skills_dirs: None,

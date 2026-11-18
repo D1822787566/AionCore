@@ -2609,18 +2609,25 @@ async fn update_extra_merge() {
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
-        "extra": { "workspace": old_workspace.to_string_lossy(), "contextFileName": "ctx.md" }
+        "extra": { "workspace": old_workspace.to_string_lossy(), "contextFileName": "ctx.md", "label": "old" }
     }))
     .unwrap();
     let conv = svc.create("user_1", req).await.unwrap();
 
-    // Update only workspace — contextFileName should be preserved
-    let update_req: UpdateConversationRequest =
-        serde_json::from_value(json!({ "extra": { "workspace": new_workspace.to_string_lossy() } })).unwrap();
+    // Workspace changes use project-directory; merge ordinary extra fields here.
+    let update_req: UpdateConversationRequest = serde_json::from_value(json!({ "extra": { "label": "new" } })).unwrap();
     let updated = svc.update("user_1", &conv.id, update_req, &task_mgr).await.unwrap();
 
-    assert_eq!(updated.extra["workspace"], new_workspace.to_string_lossy().to_string());
+    assert_eq!(updated.extra["label"], "new");
+    assert_eq!(updated.extra["workspace"], old_workspace.to_string_lossy().to_string());
     assert_eq!(updated.extra["contextFileName"], "ctx.md");
+
+    let update_req: UpdateConversationRequest =
+        serde_json::from_value(json!({ "extra": { "workspace": new_workspace.to_string_lossy() } })).unwrap();
+    assert!(matches!(
+        svc.update("user_1", &conv.id, update_req, &task_mgr).await,
+        Err(ConversationError::BadRequest { .. })
+    ));
 }
 
 #[tokio::test]

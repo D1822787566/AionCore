@@ -697,14 +697,31 @@ async fn t4_3_update_extra_merge() {
 
     let body = create_body_with_extra(
         "Merge Test",
-        json!({"workspace": old_workspace.to_string_lossy(), "context_file_name": "ctx.md"}),
+        json!({"workspace": old_workspace.to_string_lossy(), "context_file_name": "ctx.md", "label": "old"}),
     );
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
     let id = json["data"]["id"].as_str().unwrap().to_owned();
 
-    // Merge update: change workspace, keep contextFileName
+    // Workspace changes use project-directory; merge ordinary extra fields here.
+    let req = json_with_token(
+        "PATCH",
+        &format!("/api/conversations/{id}"),
+        json!({"extra": {"label": "new"}}),
+        &token,
+        &csrf,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["extra"]["label"], "new");
+    assert_eq!(
+        json["data"]["extra"]["workspace"],
+        old_workspace.to_string_lossy().to_string()
+    );
+    assert_eq!(json["data"]["extra"]["context_file_name"], "ctx.md");
+
     let req = json_with_token(
         "PATCH",
         &format!("/api/conversations/{id}"),
@@ -713,12 +730,7 @@ async fn t4_3_update_extra_merge() {
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    let json = body_json(resp).await;
-    assert_eq!(
-        json["data"]["extra"]["workspace"],
-        new_workspace.to_string_lossy().to_string()
-    );
-    assert_eq!(json["data"]["extra"]["context_file_name"], "ctx.md");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
